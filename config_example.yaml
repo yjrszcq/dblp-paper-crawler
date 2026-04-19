@@ -120,8 +120,14 @@ cache:
 
 # 通用请求配置
 request:
+  # 自定义 User-Agent；程序发出的普通 HTTP 请求都会使用它
+  user_agent: "dblp-paper-crawler/1.0 (https://dblp.org/; academic metadata enrichment; contact: local-user)"
+
   # 普通外部请求之间的基础休眠时间，单位秒；过低更容易触发限流
   sleep_seconds: 1
+
+  # 在基础休眠时间之上附加随机噪声；可以写成 [最小值, 最大值]，单位秒
+  sleep_jitter_range: [0.0, 0.5]
 
   # 单次 HTTP 请求超时时间，单位秒
   timeout_seconds: 20

@@ -90,7 +90,9 @@ cache:
   publ_query_max_refetch_rounds: 2
 
 request:
+  user_agent: "dblp-paper-crawler/1.0 (https://dblp.org/; academic metadata enrichment; contact: local-user)"
   sleep_seconds: 1
+  sleep_jitter_range: [0.0, 0.5]
   timeout_seconds: 20
   max_retries: 3
 ```
@@ -112,7 +114,10 @@ request:
 - `cache.publ_query_path`：DBLP 年度抓取缓存文件路径。只有某个 `venue/year` 完整抓取成功后才会写入，避免把半截结果缓存下来。
 - `cache.publ_query_current_year_ttl_hours`：当前年份的 DBLP 年度缓存有效期，单位小时；历史年份默认长期复用。设为 `0` 或负数时，当前年份也不主动刷新。
 - `cache.publ_query_max_refetch_rounds`：在所有会议/期刊的所有年份完整扫过一轮后，针对仍未完成的 `venue/year` 再重爬的最大轮数。`0` 表示只跑首轮，不做补抓。
-- `request`：外部请求的节流、超时、重试参数。
+- `request.user_agent`：普通外部请求统一使用的 User-Agent，可手动自定义。
+- `request.sleep_seconds`：每次请求之间的基础等待时间。
+- `request.sleep_jitter_range`：附加在 `sleep_seconds` 之上的随机噪声范围，格式是 `[最小值, 最大值]`，单位秒；如果需要，最小值可以写成负数。
+- `request.timeout_seconds` / `request.max_retries`：普通外部请求的超时和最大重试次数。
 
 `dblp` 配置也支持混合写法，例如：
 
@@ -162,6 +167,12 @@ python3 dblp_paper_crawler.py --limit 20
 
 ```bash
 python3 dblp_paper_crawler.py --no-llm --limit 20
+```
+
+如果你想把配置文件里的 `request.user_agent` 随机换成一个内置浏览器 UA，并立刻用它执行本次任务：
+
+```bash
+python3 dblp_paper_crawler.py --randomize-ua
 ```
 
 如果配置文件不在当前目录，可以手动指定：
@@ -313,6 +324,7 @@ AND
 - 单篇论文层面的 `detail / abstract / affiliation / llm` 结果也会优先复用；如果某一步还是 `pending`、`request_failed`、签名失效或配置变了，程序会自动补跑。
 - `not_found` 只表示在本轮所有候选数据源都正常返回、但仍未找到目标字段；像代理失败、429、503、解析失败这类情况会保留为失败状态，后续运行还会继续补。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
+- `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，然后使用新的 UA 继续本次运行。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
 - 去重优先级为：

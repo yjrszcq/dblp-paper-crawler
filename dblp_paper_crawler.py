@@ -39,6 +39,27 @@ USER_AGENT = (
     "dblp-paper-crawler/1.0 "
     "(https://dblp.org/; academic metadata enrichment; contact: local-user)"
 )
+DEFAULT_RANDOM_USER_AGENTS = [
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Edg/124.0.2478.80 Chrome/124.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+]
 DBLP_DEFAULT_BASE_URL = "https://dblp.org"
 CROSSREF_WORKS_API = "https://api.crossref.org/works"
 OPENALEX_WORKS_API = "https://api.openalex.org/works"
@@ -115,6 +136,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Only process the first N matched papers.",
+    )
+    parser.add_argument(
+        "--randomize-ua",
+        "--randomize-user-agent",
+        action="store_true",
+        help=(
+            "Pick a random browser-like User-Agent, write it back to request.user_agent "
+            "in the config file, and use it for this run."
+        ),
     )
     return parser.parse_args()
 
@@ -368,7 +398,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
     )
 
     request_cfg = config["request"]
+    request_cfg["user_agent"] = clean_text(request_cfg.get("user_agent")) or USER_AGENT
     request_cfg["sleep_seconds"] = float(request_cfg.get("sleep_seconds", 1))
+    jitter_min, jitter_max = normalize_sleep_jitter_range(
+        request_cfg.get("sleep_jitter_range", [0.0, 0.25])
+    )
+    request_cfg["sleep_jitter_range"] = [jitter_min, jitter_max]
+    request_cfg["sleep_jitter_min_seconds"] = jitter_min
+    request_cfg["sleep_jitter_max_seconds"] = jitter_max
     request_cfg["timeout_seconds"] = float(request_cfg.get("timeout_seconds", 20))
     request_cfg["max_retries"] = int(request_cfg.get("max_retries", 3))
 
@@ -382,11 +419,99 @@ def resolve_path(base_dir: Path, value: str) -> Path:
     return (base_dir / path).resolve()
 
 
-def build_requests_session() -> requests.Session:
+def normalize_sleep_jitter_range(value: Any) -> tuple[float, float]:
+    if value is None:
+        return 0.0, 0.25
+
+    lower: float
+    upper: float
+    if isinstance(value, dict):
+        lower = float(value.get("min", 0.0))
+        upper = float(value.get("max", lower))
+    elif isinstance(value, (list, tuple)):
+        if len(value) < 2:
+            raise ValueError("request.sleep_jitter_range must contain two numeric values")
+        lower = float(value[0])
+        upper = float(value[1])
+    else:
+        upper = float(value)
+        lower = 0.0 if upper >= 0 else upper
+
+    return (lower, upper) if lower <= upper else (upper, lower)
+
+
+def choose_random_user_agent(current_user_agent: str = "") -> str:
+    current = clean_text(current_user_agent)
+    candidates = [item for item in DEFAULT_RANDOM_USER_AGENTS if clean_text(item) != current]
+    if not candidates:
+        candidates = list(DEFAULT_RANDOM_USER_AGENTS)
+    return random.choice(candidates)
+
+
+def yaml_quote_string(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def persist_request_user_agent_to_config(config_path: str, user_agent: str) -> Path:
+    path = Path(config_path).expanduser().resolve()
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = text.splitlines()
+    serialized = yaml_quote_string(user_agent)
+
+    request_idx: Optional[int] = None
+    request_indent = ""
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r"^request\s*:\s*(?:#.*)?$", stripped):
+            request_idx = idx
+            request_indent = line[: len(line) - len(line.lstrip())]
+            break
+
+    if request_idx is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(
+            [
+                "request:",
+                f"  user_agent: {serialized}",
+            ]
+        )
+    else:
+        child_indent = f"{request_indent}  "
+        section_end = len(lines)
+        for idx in range(request_idx + 1, len(lines)):
+            stripped = lines[idx].strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = lines[idx][: len(lines[idx]) - len(lines[idx].lstrip())]
+            if len(indent) <= len(request_indent):
+                section_end = idx
+                break
+
+        replaced = False
+        for idx in range(request_idx + 1, section_end):
+            stripped = lines[idx].strip()
+            if re.match(r"^user_agent\s*:\s*.*$", stripped):
+                lines[idx] = f"{child_indent}user_agent: {serialized}"
+                replaced = True
+                break
+
+        if not replaced:
+            insert_idx = request_idx + 1
+            while insert_idx < section_end and not lines[insert_idx].strip():
+                insert_idx += 1
+            lines.insert(insert_idx, f"{child_indent}user_agent: {serialized}")
+
+    trailing_newline = "\n" if text.endswith("\n") or not text else ""
+    path.write_text("\n".join(lines) + trailing_newline, encoding="utf-8")
+    return path
+
+
+def build_requests_session(request_cfg: Dict[str, Any]) -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": USER_AGENT,
+            "User-Agent": request_cfg["user_agent"],
             "Accept": "application/json, text/html, application/xml, text/xml;q=0.9",
         }
     )
@@ -410,8 +535,10 @@ def ensure_parent_directory(path_str: str) -> None:
 
 def pause_request(request_cfg: Dict[str, Any], attempt: int = 0) -> None:
     base_sleep = max(0.0, float(request_cfg.get("sleep_seconds", 0)))
-    jitter = random.uniform(0, 0.25)
-    delay = base_sleep + min(attempt, 3) * 0.5 + jitter
+    jitter_min = float(request_cfg.get("sleep_jitter_min_seconds", 0.0))
+    jitter_max = float(request_cfg.get("sleep_jitter_max_seconds", 0.25))
+    jitter = random.uniform(jitter_min, jitter_max)
+    delay = max(0.0, base_sleep + min(attempt, 3) * 0.5 + jitter)
     if delay > 0:
         time.sleep(delay)
 
@@ -3143,7 +3270,21 @@ def main() -> int:
         logger.error("Failed to load config: %s", exc)
         return 1
 
-    session = build_requests_session()
+    if args.randomize_ua:
+        chosen_user_agent = choose_random_user_agent(config["request"].get("user_agent", ""))
+        try:
+            config_path = persist_request_user_agent_to_config(args.config, chosen_user_agent)
+        except Exception as exc:
+            logger.error("Failed to persist randomized User-Agent to config: %s", exc)
+            return 1
+        config["request"]["user_agent"] = chosen_user_agent
+        logger.info(
+            "Randomized request.user_agent in %s -> %s",
+            config_path,
+            chosen_user_agent,
+        )
+
+    session = build_requests_session(config["request"])
     cache_enabled = bool(config["cache"]["enabled"])
     cache_path = config["cache"]["path"]
     cache_index = load_cache(cache_path, config["dblp"]["base_url"]) if cache_enabled else {}
@@ -3185,7 +3326,7 @@ def main() -> int:
         )
 
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
@@ -3196,6 +3337,10 @@ def main() -> int:
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
+        config["request"]["user_agent"],
+        config["request"]["sleep_seconds"],
+        config["request"]["sleep_jitter_min_seconds"],
+        config["request"]["sleep_jitter_max_seconds"],
     )
 
     matched_candidate_map: Dict[str, Dict[str, Any]] = {}
