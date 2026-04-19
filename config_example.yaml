@@ -3,65 +3,128 @@
 #   python3 dblp_paper_crawler.py --config config_example.yaml --test-ai
 #   python3 dblp_paper_crawler.py --config config_example.yaml --no-llm --limit 20
 
+# DBLP 抓取相关配置
 dblp:
+  # DBLP 根路径；默认用官方站，也可以改成镜像站，例如 https://dblp.uni-trier.de/
   base_url: "https://dblp.org"
+
+  # 要抓取的会议/期刊列表；键是导出时使用的 venue 名称
   venues:
+    # 下面以 TPAMI / AAAI / NeurIPS 作为示例
     TPAMI:
+      # 是否启用这个 venue
       enabled: false
+
+      # 推荐直接写 stream_query，最稳定，也能少一次 HTML 解析请求
       stream_query: "streamid:journals/pami:"
+
     AAAI:
+      # 是否启用这个 venue
       enabled: true
+
+      # 这个值通常可以写成 streamid:conf/<venue-short-name>:
       stream_query: "streamid:conf/aaai:"
+
     NeurIPS:
+      # 是否启用这个 venue
       enabled: true
+
+      # 如果你知道对应 stream_query，优先填它
       stream_query: "streamid:conf/nips:"
+
+  # 起始年份，闭区间
   year_start: 2020
+
+  # 结束年份，闭区间
   year_end: 2025
 
+# 标题关键词匹配规则
 match_rules:
+  # 每个 [] 是一组关键词：组内 OR；多个 [] 之间：组间 AND
   - [
       "agent",
       "agents",
       "agentic"
     ]
+  # 这表示标题还必须命中下面这一组里的至少一个关键词
   - [
       "safety",
       "privacy",
       "private"
     ]
 
+# LLM 分类标签配置
 classification:
+  # 候选类别列表；LLM 会优先从这里选择分类
   categories:
     - "智能体安全"
     - "智能体隐私保护"
     - "智能体攻击与对抗"
     - "其他"
+
+  # 如果现有 categories 都不合适，是否允许模型建议一个新类别
   allow_new_category: true
 
+# OpenAI 兼容接口配置
 openai:
+  # OpenAI 兼容接口根路径
   host: "https://api.openai.com/v1"
+
+  # API Key；请替换成你自己的真实值
   api_key: "YOUR_API_KEY"
+
+  # 使用的模型名称
   model: "gpt-4o-mini"
+
+  # 生成温度；越低越稳定
   temperature: 0.2
+
+  # 单次请求允许的最大输出 token 数
   max_tokens: 500
+
+  # OpenAI 接口调用失败时的最大重试次数
   max_retries: 3
 
+# LLM 输出格式控制
 llm_output:
+  # 是否生成论文标题中文翻译
   title_translation_enabled: true
+
+  # 摘要总结语言；目前支持 zh 或 en
   summary_language: "zh"
 
+# 导出配置
 output:
+  # CSV 输出目录；会按 venue 分文件导出
   csv_dir: "./outputs"
 
+# 缓存配置
 cache:
+  # 是否启用缓存
   enabled: true
+
+  # 单篇论文处理结果缓存路径（JSONL）
   path: "./cache/papers_cache.jsonl"
+
+  # 是否启用 DBLP search/publ/api 的 venue + year 年度抓取缓存
   publ_query_enabled: true
+
+  # 年度抓取缓存文件路径（JSON）
   publ_query_path: "./cache/dblp_publ_cache.json"
+
+  # 当前年份年度缓存的有效期，单位小时；历史年份默认长期复用
   publ_query_current_year_ttl_hours: 24
+
+  # 全部 venue/year 跑完一轮后，针对未完成项的额外补抓轮数上限
   publ_query_max_refetch_rounds: 2
 
+# 通用请求配置
 request:
+  # 普通外部请求之间的基础休眠时间，单位秒；过低更容易触发限流
   sleep_seconds: 1
+
+  # 单次 HTTP 请求超时时间，单位秒
   timeout_seconds: 20
+
+  # 普通外部请求的最大重试次数
   max_retries: 3
