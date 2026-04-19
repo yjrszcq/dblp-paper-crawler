@@ -182,16 +182,24 @@ python3 dblp_paper_crawler.py --test-ai
 python3 dblp_paper_crawler.py --config /path/to/config.yaml --test-ai
 ```
 
-只从已有缓存继续补齐，不重新抓取新的 DBLP 论文：
+默认运行就会先读缓存：已完成的部分直接复用，缺失的部分自动补齐。
+
+如果你想从 DBLP 抓取阶段重新开始，并重写当前配置范围内该阶段及之后的缓存：
 
 ```bash
-python3 dblp_paper_crawler.py --resume-only
+python3 dblp_paper_crawler.py --restart-from fetch
+```
+
+如果你只想保留已抓到的论文列表，但从“标题匹配及之后”重新开始：
+
+```bash
+python3 dblp_paper_crawler.py --restart-from match
 ```
 
 也可以配合限制条数一起使用：
 
 ```bash
-python3 dblp_paper_crawler.py --resume-only --limit 20
+python3 dblp_paper_crawler.py --restart-from llm --limit 20
 ```
 
 ## 4. 关键词匹配规则说明
@@ -298,16 +306,22 @@ AND
 
 行为如下：
 
-- 每处理完一个阶段，都会把中间结果追加写入缓存。
-- 程序重启后，会优先复用已有成功结果。
-- 如果上一次停在网络失败、解析失败、LLM 失败等中间状态，下一次运行会继续尝试补齐。
-- 如果使用 `--resume-only`，程序不会重新向 DBLP 拉新论文，只会从现有缓存中筛出符合当前配置的记录继续处理。
+- 默认直接运行脚本时，会先读取 `cache.path` 和 `cache.publ_query_path`。
+- 如果某个 `venue/year` 的 DBLP 抓取缓存已经完整，就直接复用；不完整则只补抓缺失部分。
+- 单篇论文层面的 `detail / abstract / affiliation / llm` 结果也会优先复用；如果某一步还是 `pending`、`request_failed`、签名失效或配置变了，程序会自动补跑。
+- 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
+- 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
+- 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
 - 去重优先级为：
   - DOI
   - DBLP URL
   - 标准化后的标题
 
-如果你希望重新完整抓取同一批论文，可以删除缓存文件后重新运行。
+如果你希望重新完整抓取当前配置范围内的论文，直接运行：
+
+```bash
+python3 dblp_paper_crawler.py --restart-from fetch
+```
 
 ## 8. OpenAI 兼容接口说明
 

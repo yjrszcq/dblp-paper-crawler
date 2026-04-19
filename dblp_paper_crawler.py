@@ -45,6 +45,40 @@ OPENALEX_WORKS_API = "https://api.openalex.org/works"
 SEMANTIC_SCHOLAR_PAPER_API = "https://api.semanticscholar.org/graph/v1/paper"
 SEMANTIC_SCHOLAR_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 ARXIV_API = "https://export.arxiv.org/api/query"
+RESTART_STAGE_ORDER = {
+    "fetch": 0,
+    "match": 1,
+    "detail": 2,
+    "abstract": 3,
+    "affiliation": 4,
+    "llm": 5,
+}
+RESTART_STAGE_ALIASES = {
+    "fetch": "fetch",
+    "crawl": "fetch",
+    "dblp": "fetch",
+    "match": "match",
+    "matching": "match",
+    "filter": "match",
+    "detail": "detail",
+    "metadata": "detail",
+    "abstract": "abstract",
+    "summary-input": "abstract",
+    "affiliation": "affiliation",
+    "affiliations": "affiliation",
+    "llm": "llm",
+    "ai": "llm",
+}
+
+
+def parse_restart_stage(value: str) -> str:
+    stage = RESTART_STAGE_ALIASES.get(str(value).strip().lower())
+    if not stage:
+        supported = ", ".join(RESTART_STAGE_ORDER.keys())
+        raise argparse.ArgumentTypeError(
+            f"Unsupported restart stage: {value!r}. Use one of: {supported}."
+        )
+    return stage
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,9 +101,14 @@ def parse_args() -> argparse.Namespace:
         help="Only test whether the OpenAI-compatible API configuration works, then exit.",
     )
     parser.add_argument(
-        "--resume-only",
-        action="store_true",
-        help="Do not fetch new DBLP records. Resume processing only from existing cache records.",
+        "--restart-from",
+        type=parse_restart_stage,
+        default=None,
+        help=(
+            "Restart from a specific stage and rewrite cache for that stage and later. "
+            "Supported stages: fetch, match, detail, abstract, affiliation, llm. "
+            "Aliases such as crawl->fetch are also accepted."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -2811,23 +2850,185 @@ def collect_unique_cached_records(cache_index: Dict[str, Dict[str, Any]]) -> Lis
     return list(unique_records.values())
 
 
-def collect_resume_candidates(
+def is_record_in_config_scope(record: Dict[str, Any], config: Dict[str, Any]) -> bool:
+    venues = set(config["dblp"]["venues"])
+    source_venue = first_non_empty(record.get("source_venue"), record.get("venue"))
+    if source_venue not in venues:
+        return False
+
+    year = safe_int(record.get("year"))
+    if year is None:
+        return True
+
+    return config["dblp"]["year_start"] <= year <= config["dblp"]["year_end"]
+
+
+def is_publ_query_entry_in_config_scope(entry: Dict[str, Any], config: Dict[str, Any]) -> bool:
+    venue_name = clean_text(entry.get("venue_name"))
+    year = safe_int(entry.get("year"))
+    if venue_name not in set(config["dblp"]["venues"]) or year is None:
+        return False
+    return config["dblp"]["year_start"] <= year <= config["dblp"]["year_end"]
+
+
+def persist_cache_records(
+    cache_path: str,
+    records: List[Dict[str, Any]],
+    dblp_base_url: str = "",
+) -> None:
+    path = Path(cache_path).expanduser().resolve()
+    ensure_parent_directory(str(path))
+
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            normalized = sanitize_record_for_cache(record, dblp_base_url)
+            if not normalized.get("dedupe_key"):
+                continue
+            handle.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+    tmp_path.replace(path)
+
+
+def rebuild_cache_index(
+    records: List[Dict[str, Any]],
+    dblp_base_url: str = "",
+) -> Dict[str, Dict[str, Any]]:
+    index: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        normalized = sanitize_record_for_cache(record, dblp_base_url)
+        if not normalized.get("dedupe_key"):
+            continue
+        for key in make_record_keys(normalized):
+            index[key] = normalized
+    return index
+
+
+def restart_includes_stage(restart_stage: str, stage_name: str) -> bool:
+    return RESTART_STAGE_ORDER[restart_stage] <= RESTART_STAGE_ORDER[stage_name]
+
+
+def reset_record_from_stage(record: Dict[str, Any], restart_stage: str) -> Dict[str, Any]:
+    updated = sanitize_record_for_cache(record)
+
+    if restart_includes_stage(restart_stage, "match"):
+        updated["match_checked"] = False
+        updated["matched"] = False
+
+    if restart_includes_stage(restart_stage, "detail"):
+        updated["detail_status"] = "pending"
+        updated["completed"] = False
+        updated["skip_export"] = False
+
+    if restart_includes_stage(restart_stage, "abstract"):
+        updated["abstract"] = NA
+        updated["abstract_source"] = NA
+        updated["abstract_status"] = "pending"
+        updated["abstract_signature"] = ""
+        updated["completed"] = False
+        updated["skip_export"] = False
+
+    if restart_includes_stage(restart_stage, "affiliation"):
+        updated["affiliations"] = [NA]
+        updated["affiliation_source"] = NA
+        updated["affiliation_mode"] = NA
+        updated["affiliation_status"] = "pending"
+        updated["affiliation_signature"] = ""
+        updated["completed"] = False
+        updated["skip_export"] = False
+
+    if restart_includes_stage(restart_stage, "llm"):
+        updated["title_translation"] = NA
+        updated["title_translation_status"] = "pending"
+        updated["summary_text"] = NA
+        updated["summary_language"] = NA
+        updated["summary_zh"] = NA
+        updated["category"] = NA
+        updated["ai_suggested_category"] = NA
+        updated["reason"] = NA
+        updated["llm_signature"] = ""
+        updated["llm_status"] = "pending"
+        updated["completed"] = False
+        updated["skip_export"] = False
+
+    return updated
+
+
+def apply_restart_from_stage(
+    restart_stage: str,
+    config: Dict[str, Any],
+    cache_path: str,
+    cache_index: Dict[str, Dict[str, Any]],
+    cache_enabled: bool,
+    publ_query_cache_path: str,
+    publ_query_cache_index: Dict[str, Dict[str, Any]],
+    publ_query_cache_enabled: bool,
+    dblp_base_url: str,
+    logger: logging.Logger,
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    if restart_stage == "fetch":
+        original_records = collect_unique_cached_records(cache_index)
+        kept_records = [
+            record
+            for record in original_records
+            if not is_record_in_config_scope(record, config)
+        ]
+        if cache_enabled:
+            persist_cache_records(cache_path, kept_records, dblp_base_url)
+        cache_index = rebuild_cache_index(kept_records, dblp_base_url)
+
+        original_publ_entry_count = len(publ_query_cache_index)
+        kept_publ_entries = {
+            key: entry
+            for key, entry in publ_query_cache_index.items()
+            if not is_publ_query_entry_in_config_scope(entry, config)
+        }
+        if publ_query_cache_enabled:
+            persist_publ_query_cache(publ_query_cache_path, kept_publ_entries)
+        publ_query_cache_index = kept_publ_entries
+
+        logger.info(
+            "Restarting from fetch: cleared %s paper cache records and %s DBLP publ cache entries in the current scope",
+            max(len(original_records) - len(kept_records), 0),
+            max(original_publ_entry_count - len(kept_publ_entries), 0),
+        )
+        return cache_index, publ_query_cache_index
+
+    if not cache_enabled:
+        logger.warning(
+            "--restart-from=%s requested, but cache.enabled=false so there is no paper cache to rewrite",
+            restart_stage,
+        )
+        return cache_index, publ_query_cache_index
+
+    rewritten_records: List[Dict[str, Any]] = []
+    affected_count = 0
+    for record in collect_unique_cached_records(cache_index):
+        if is_record_in_config_scope(record, config):
+            rewritten_records.append(reset_record_from_stage(record, restart_stage))
+            affected_count += 1
+        else:
+            rewritten_records.append(sanitize_record_for_cache(record, dblp_base_url))
+
+    persist_cache_records(cache_path, rewritten_records, dblp_base_url)
+    cache_index = rebuild_cache_index(rewritten_records, dblp_base_url)
+
+    logger.info(
+        "Restarting from %s: rewrote %s paper cache records in the current scope",
+        restart_stage,
+        affected_count,
+    )
+    return cache_index, publ_query_cache_index
+
+
+def collect_cached_candidates(
     cache_index: Dict[str, Dict[str, Any]],
     config: Dict[str, Any],
     logger: logging.Logger,
 ) -> List[Dict[str, Any]]:
-    venues = set(config["dblp"]["venues"])
-    year_start = config["dblp"]["year_start"]
-    year_end = config["dblp"]["year_end"]
     candidates: List[Dict[str, Any]] = []
 
     for record in collect_unique_cached_records(cache_index):
-        source_venue = first_non_empty(record.get("source_venue"), record.get("venue"))
-        if source_venue not in venues:
-            continue
-
-        year = safe_int(record.get("year"))
-        if year is not None and not (year_start <= year <= year_end):
+        if not is_record_in_config_scope(record, config):
             continue
 
         title = clean_text(record.get("title"))
@@ -2840,11 +3041,11 @@ def collect_resume_candidates(
             candidates.append(record)
 
     logger.info(
-        "Resume-only mode loaded %s matched cached papers for venues=%s years=%s-%s",
+        "Loaded %s matched papers from cache for venues=%s years=%s-%s",
         len(candidates),
         config["dblp"]["venues"],
-        year_start,
-        year_end,
+        config["dblp"]["year_start"],
+        config["dblp"]["year_end"],
     )
     return candidates
 
@@ -2890,69 +3091,86 @@ def main() -> int:
         logger.info("Testing AI API configuration using config: %s", args.config)
         return 0 if test_ai_configuration(config, client, logger) else 1
 
+    if args.restart_from:
+        cache_index, publ_query_cache_index = apply_restart_from_stage(
+            restart_stage=args.restart_from,
+            config=config,
+            cache_path=cache_path,
+            cache_index=cache_index,
+            cache_enabled=cache_enabled,
+            publ_query_cache_path=publ_query_cache_path,
+            publ_query_cache_index=publ_query_cache_index,
+            publ_query_cache_enabled=publ_query_cache_enabled,
+            dblp_base_url=config["dblp"]["base_url"],
+            logger=logger,
+        )
+
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s resume_only=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
         config["dblp"]["year_end"],
         args.no_llm,
-        args.resume_only,
+        args.restart_from or NA,
         args.limit,
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
     )
 
-    matched_candidates: List[Dict[str, Any]] = []
-    if args.resume_only:
-        if not cache_enabled:
-            logger.error("--resume-only requires cache.enabled=true in the config.")
-            return 1
-        if not cache_index:
-            logger.warning("Resume-only mode found no cache records to process.")
-            return 0
-        matched_candidates = collect_resume_candidates(cache_index, config, logger)
-    else:
-        papers = fetch_papers_from_dblp(
-            venues=config["dblp"]["venues"],
-            year_start=config["dblp"]["year_start"],
-            year_end=config["dblp"]["year_end"],
-            venue_overrides=config["dblp"].get("venue_stream_overrides", {}),
-            dblp_base_url=config["dblp"]["base_url"],
-            dblp_venue_api_url=config["dblp"]["venue_api_url"],
-            dblp_publ_api_url=config["dblp"]["publ_api_url"],
-            publ_query_cache_path=publ_query_cache_path,
-            publ_query_cache_index=publ_query_cache_index,
-            publ_query_cache_enabled=publ_query_cache_enabled,
-            publ_query_current_year_ttl_hours=publ_query_current_year_ttl_hours,
-            publ_query_max_refetch_rounds=publ_query_max_refetch_rounds,
-            session=session,
-            request_cfg=config["request"],
-            logger=logger,
-        )
+    matched_candidate_map: Dict[str, Dict[str, Any]] = {}
+    if cache_enabled and cache_index:
+        for record in collect_cached_candidates(cache_index, config, logger):
+            dedupe_key = compute_primary_dedupe_key(record)
+            if dedupe_key:
+                matched_candidate_map[dedupe_key] = record
 
-        for paper in papers:
-            cached = lookup_cached_record(cache_index, paper) or {}
-            record = merge_record(paper, cached)
-            record["matched"] = match_title(record.get("title", ""), config["match_rules"])
-            record["normalized_title"] = normalize_title(record.get("title", ""))
-            logger.info(
-                "Title match=%s | venue=%s | year=%s | title=%s",
-                record["matched"],
-                record.get("venue", NA),
-                record.get("year", NA),
-                record.get("title", NA),
-            )
-            append_cache_record(
-                record,
-                cache_path,
-                cache_index,
-                cache_enabled,
-                config["dblp"]["base_url"],
-            )
-            if record["matched"]:
-                matched_candidates.append(record)
+    papers = fetch_papers_from_dblp(
+        venues=config["dblp"]["venues"],
+        year_start=config["dblp"]["year_start"],
+        year_end=config["dblp"]["year_end"],
+        venue_overrides=config["dblp"].get("venue_stream_overrides", {}),
+        dblp_base_url=config["dblp"]["base_url"],
+        dblp_venue_api_url=config["dblp"]["venue_api_url"],
+        dblp_publ_api_url=config["dblp"]["publ_api_url"],
+        publ_query_cache_path=publ_query_cache_path,
+        publ_query_cache_index=publ_query_cache_index,
+        publ_query_cache_enabled=publ_query_cache_enabled,
+        publ_query_current_year_ttl_hours=publ_query_current_year_ttl_hours,
+        publ_query_max_refetch_rounds=publ_query_max_refetch_rounds,
+        session=session,
+        request_cfg=config["request"],
+        logger=logger,
+    )
+
+    for paper in papers:
+        cached = lookup_cached_record(cache_index, paper) or {}
+        record = merge_record(paper, cached)
+        record["matched"] = match_title(record.get("title", ""), config["match_rules"])
+        record["normalized_title"] = normalize_title(record.get("title", ""))
+        logger.info(
+            "Title match=%s | venue=%s | year=%s | title=%s",
+            record["matched"],
+            record.get("venue", NA),
+            record.get("year", NA),
+            record.get("title", NA),
+        )
+        append_cache_record(
+            record,
+            cache_path,
+            cache_index,
+            cache_enabled,
+            config["dblp"]["base_url"],
+        )
+        if not record["matched"]:
+            continue
+
+        dedupe_key = compute_primary_dedupe_key(record)
+        if dedupe_key:
+            matched_candidate_map[dedupe_key] = record
+
+    matched_candidates = list(matched_candidate_map.values())
 
     if args.limit is not None:
         matched_candidates = matched_candidates[: max(args.limit, 0)]
