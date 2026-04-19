@@ -55,6 +55,10 @@ output:
 cache:
   enabled: true
   path: "./cache/papers_cache.jsonl"
+  publ_query_enabled: true
+  publ_query_path: "./cache/dblp_publ_cache.json"
+  publ_query_current_year_ttl_hours: 24
+  publ_query_max_refetch_rounds: 2
 
 request:
   sleep_seconds: 1

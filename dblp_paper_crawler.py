@@ -261,6 +261,17 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cache_cfg = config["cache"]
     cache_cfg["enabled"] = bool(cache_cfg.get("enabled", True))
     cache_cfg["path"] = str(resolve_path(path.parent, cache_cfg.get("path", "./cache/papers_cache.jsonl")))
+    cache_cfg["publ_query_enabled"] = bool(cache_cfg.get("publ_query_enabled", cache_cfg["enabled"]))
+    cache_cfg["publ_query_path"] = str(
+        resolve_path(path.parent, cache_cfg.get("publ_query_path", "./cache/dblp_publ_cache.json"))
+    )
+    cache_cfg["publ_query_current_year_ttl_hours"] = float(
+        cache_cfg.get("publ_query_current_year_ttl_hours", 24)
+    )
+    cache_cfg["publ_query_max_refetch_rounds"] = max(
+        0,
+        int(cache_cfg.get("publ_query_max_refetch_rounds", 2)),
+    )
 
     request_cfg = config["request"]
     request_cfg["sleep_seconds"] = float(request_cfg.get("sleep_seconds", 1))
@@ -427,6 +438,15 @@ def safe_int(value: Any) -> Optional[int]:
         return None
 
 
+def safe_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def to_list(value: Any) -> List[Any]:
     if value is None:
         return []
@@ -574,6 +594,137 @@ def append_cache_record(
         handle.write(json.dumps(normalized, ensure_ascii=False) + "\n")
     for key in make_record_keys(normalized):
         cache_index[key] = normalized
+
+
+def make_publ_query_cache_key(venue_name: str, stream_query: str, year: int) -> str:
+    return make_fingerprint(normalize_title(venue_name), clean_text(stream_query), str(year))
+
+
+def sanitize_publ_query_cache_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    venue_name = clean_text(entry.get("venue_name"))
+    stream_query = clean_text(entry.get("stream_query"))
+    year = safe_int(entry.get("year"))
+    if not venue_name or not stream_query or year is None:
+        return None
+
+    records = [
+        sanitize_record_for_cache(record)
+        for record in to_list(entry.get("records"))
+        if isinstance(record, dict)
+    ]
+    return {
+        "venue_name": venue_name,
+        "stream_query": stream_query,
+        "year": year,
+        "records": records,
+        "complete": bool(entry.get("complete", False)),
+        "updated_at": safe_float(entry.get("updated_at")) or 0.0,
+    }
+
+
+def load_publ_query_cache(cache_path: str) -> Dict[str, Dict[str, Any]]:
+    path = Path(cache_path).expanduser().resolve()
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+    entries: Iterable[Any]
+    if isinstance(payload, dict):
+        entries = payload.values()
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        return {}
+
+    index: Dict[str, Dict[str, Any]] = {}
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        normalized = sanitize_publ_query_cache_entry(raw_entry)
+        if not normalized:
+            continue
+        key = make_publ_query_cache_key(
+            normalized["venue_name"],
+            normalized["stream_query"],
+            normalized["year"],
+        )
+        index[key] = normalized
+    return index
+
+
+def persist_publ_query_cache(cache_path: str, cache_index: Dict[str, Dict[str, Any]]) -> None:
+    path = Path(cache_path).expanduser().resolve()
+    ensure_parent_directory(str(path))
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(cache_index, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path.replace(path)
+
+
+def lookup_publ_query_cache_entry(
+    cache_index: Dict[str, Dict[str, Any]],
+    venue_name: str,
+    stream_query: str,
+    year: int,
+) -> Optional[Dict[str, Any]]:
+    key = make_publ_query_cache_key(venue_name, stream_query, year)
+    entry = cache_index.get(key)
+    return dict(entry) if entry else None
+
+
+def clone_publ_query_cache_records(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [dict(record) for record in entry.get("records", []) if isinstance(record, dict)]
+
+
+def save_publ_query_cache_entry(
+    entry: Dict[str, Any],
+    cache_path: str,
+    cache_index: Dict[str, Dict[str, Any]],
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+    normalized = sanitize_publ_query_cache_entry(entry)
+    if not normalized:
+        return
+    key = make_publ_query_cache_key(
+        normalized["venue_name"],
+        normalized["stream_query"],
+        normalized["year"],
+    )
+    cache_index[key] = normalized
+    persist_publ_query_cache(cache_path, cache_index)
+
+
+def can_reuse_publ_query_cache_entry(
+    entry: Optional[Dict[str, Any]],
+    ttl_hours: float,
+    now: Optional[float] = None,
+) -> bool:
+    if not entry or not entry.get("complete"):
+        return False
+
+    year = safe_int(entry.get("year"))
+    if year is None:
+        return False
+
+    current_time = time.time() if now is None else now
+    current_year = time.localtime(current_time).tm_year
+    if year < current_year:
+        return True
+
+    if ttl_hours <= 0:
+        return True
+
+    updated_at = safe_float(entry.get("updated_at"))
+    if updated_at is None or updated_at <= 0:
+        return False
+    return (current_time - updated_at) <= ttl_hours * 3600
 
 
 def normalize_hostname(url: str) -> str:
@@ -872,58 +1023,234 @@ def parse_paper_from_search_hit(hit: Dict[str, Any], venue_hint: str) -> Optiona
     return record
 
 
+def make_publ_query_task_id(venue_name: str, year: int) -> str:
+    return make_fingerprint(clean_text(venue_name), str(year))
+
+
+def summarize_publ_query_tasks(tasks: List[Dict[str, Any]], limit: int = 8) -> str:
+    labels = [f"{task['venue_name']}:{task['year']}" for task in tasks[:limit]]
+    if len(tasks) > limit:
+        labels.append(f"...(+{len(tasks) - limit} more)")
+    return ", ".join(labels) if labels else "none"
+
+
+def fetch_dblp_papers_for_venue_year(
+    venue_name: str,
+    stream_query: str,
+    year: int,
+    session: requests.Session,
+    request_cfg: Dict[str, Any],
+    logger: logging.Logger,
+) -> tuple[List[Dict[str, Any]], bool]:
+    logger.info("Fetching DBLP papers for venue=%s year=%s", venue_name, year)
+    offset = 0
+    page_size = 1000
+    year_papers: List[Dict[str, Any]] = []
+
+    while True:
+        payload = request_json(
+            session,
+            DBLP_PUBL_API,
+            request_cfg,
+            logger,
+            params={
+                "q": f"{stream_query} {year}$",
+                "format": "json",
+                "h": page_size,
+                "f": offset,
+                "c": 0,
+            },
+        )
+        if payload is None:
+            logger.warning(
+                "DBLP publ query incomplete for venue=%s year=%s offset=%s; this venue/year will be retried later",
+                venue_name,
+                year,
+                offset,
+            )
+            return year_papers, False
+
+        hits = extract_search_hits(payload)
+        if not hits:
+            return year_papers, True
+
+        for hit in hits:
+            paper = parse_paper_from_search_hit(hit, venue_name)
+            if paper:
+                year_papers.append(paper)
+
+        if len(hits) < page_size:
+            return year_papers, True
+        offset += len(hits)
+
+
 def fetch_papers_from_dblp(
     venues: List[str],
     year_start: int,
     year_end: int,
     venue_overrides: Dict[str, str],
+    publ_query_cache_path: str,
+    publ_query_cache_index: Dict[str, Dict[str, Any]],
+    publ_query_cache_enabled: bool,
+    publ_query_current_year_ttl_hours: float,
+    publ_query_max_refetch_rounds: int,
     session: requests.Session,
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
 ) -> List[Dict[str, Any]]:
-    papers: List[Dict[str, Any]] = []
-    seen_urls: set[str] = set()
-
+    tasks: List[Dict[str, Any]] = []
     for venue_name in venues:
-        resolved = resolve_venue(venue_name, venue_overrides, session, request_cfg, logger)
-        if not resolved:
-            continue
-
-        stream_query = resolved["stream_query"]
         for year in range(year_start, year_end + 1):
-            logger.info("Fetching DBLP papers for venue=%s year=%s", venue_name, year)
-            offset = 0
-            page_size = 1000
-            while True:
-                payload = request_json(
+            tasks.append(
+                {
+                    "task_id": make_publ_query_task_id(venue_name, year),
+                    "venue_name": venue_name,
+                    "year": year,
+                }
+            )
+
+    total_rounds = publ_query_max_refetch_rounds + 1
+    pending_tasks = list(tasks)
+    pair_results: Dict[str, List[Dict[str, Any]]] = {}
+    resolved_venues: Dict[str, Dict[str, str]] = {}
+
+    for round_index in range(total_rounds):
+        if not pending_tasks:
+            break
+
+        logger.info(
+            "Starting DBLP publ fetch round %s/%s pending_tasks=%s",
+            round_index + 1,
+            total_rounds,
+            len(pending_tasks),
+        )
+        if round_index > 0:
+            logger.info(
+                "Retrying incomplete DBLP publ tasks: %s",
+                summarize_publ_query_tasks(pending_tasks),
+            )
+
+        grouped_tasks: Dict[str, List[Dict[str, Any]]] = {}
+        for task in pending_tasks:
+            grouped_tasks.setdefault(task["venue_name"], []).append(task)
+
+        next_pending: List[Dict[str, Any]] = []
+        for venue_name in venues:
+            venue_tasks = grouped_tasks.get(venue_name, [])
+            if not venue_tasks:
+                continue
+
+            resolved = resolved_venues.get(venue_name)
+            if not resolved:
+                resolved = resolve_venue(venue_name, venue_overrides, session, request_cfg, logger)
+                if resolved:
+                    resolved_venues[venue_name] = resolved
+            if not resolved:
+                logger.warning(
+                    "Still unable to resolve venue=%s in DBLP publ round %s/%s; will retry all pending years for this venue",
+                    venue_name,
+                    round_index + 1,
+                    total_rounds,
+                )
+                next_pending.extend(venue_tasks)
+                continue
+
+            stream_query = resolved["stream_query"]
+            for task in venue_tasks:
+                year = task["year"]
+                task_id = task["task_id"]
+                cached_year_entry = lookup_publ_query_cache_entry(
+                    publ_query_cache_index,
+                    venue_name,
+                    stream_query,
+                    year,
+                )
+                if can_reuse_publ_query_cache_entry(
+                    cached_year_entry,
+                    publ_query_current_year_ttl_hours,
+                ):
+                    cached_records = clone_publ_query_cache_records(cached_year_entry)
+                    pair_results[task_id] = cached_records
+                    logger.info(
+                        "Reusing DBLP publ cache for venue=%s year=%s cached_records=%s",
+                        venue_name,
+                        year,
+                        len(cached_records),
+                    )
+                    continue
+
+                year_papers, year_complete = fetch_dblp_papers_for_venue_year(
+                    venue_name,
+                    stream_query,
+                    year,
                     session,
-                    DBLP_PUBL_API,
                     request_cfg,
                     logger,
-                    params={
-                        "q": f"{stream_query} {year}$",
-                        "format": "json",
-                        "h": page_size,
-                        "f": offset,
-                        "c": 0,
-                    },
                 )
-                hits = extract_search_hits(payload)
-                if not hits:
-                    break
+                if year_complete:
+                    pair_results[task_id] = year_papers
+                    save_publ_query_cache_entry(
+                        {
+                            "venue_name": venue_name,
+                            "stream_query": stream_query,
+                            "year": year,
+                            "records": year_papers,
+                            "complete": True,
+                            "updated_at": time.time(),
+                        },
+                        publ_query_cache_path,
+                        publ_query_cache_index,
+                        publ_query_cache_enabled,
+                    )
+                    continue
 
-                for hit in hits:
-                    paper = parse_paper_from_search_hit(hit, venue_name)
-                    if not paper:
-                        continue
-                    if paper["dblp_url"] in seen_urls:
-                        continue
-                    seen_urls.add(paper["dblp_url"])
-                    papers.append(paper)
+                if cached_year_entry and cached_year_entry.get("complete"):
+                    stale_records = clone_publ_query_cache_records(cached_year_entry)
+                    pair_results[task_id] = stale_records
+                    logger.warning(
+                        "Using stale DBLP publ cache for venue=%s year=%s cached_records=%s; this venue/year remains pending for later retry",
+                        venue_name,
+                        year,
+                        len(stale_records),
+                    )
+                else:
+                    pair_results.pop(task_id, None)
+                    logger.warning(
+                        "No complete DBLP publ cache available for venue=%s year=%s; this venue/year remains pending for later retry",
+                        venue_name,
+                        year,
+                    )
+                next_pending.append(task)
 
-                if len(hits) < page_size:
-                    break
-                offset += len(hits)
+        pending_tasks = next_pending
+        if pending_tasks:
+            logger.warning(
+                "DBLP publ fetch round %s/%s finished with %s incomplete venue/year tasks: %s",
+                round_index + 1,
+                total_rounds,
+                len(pending_tasks),
+                summarize_publ_query_tasks(pending_tasks),
+            )
+
+    if pending_tasks:
+        logger.warning(
+            "DBLP publ fetch stopped with %s incomplete venue/year tasks after %s total rounds: %s",
+            len(pending_tasks),
+            total_rounds,
+            summarize_publ_query_tasks(pending_tasks),
+        )
+    else:
+        logger.info("DBLP publ fetch completed for all venue/year tasks within %s rounds", total_rounds)
+
+    papers: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for task in tasks:
+        for paper in pair_results.get(task["task_id"], []):
+            dblp_url = clean_text(paper.get("dblp_url"))
+            if not dblp_url or dblp_url in seen_urls:
+                continue
+            seen_urls.add(dblp_url)
+            papers.append(paper)
 
     logger.info("Fetched %s candidate DBLP records before title matching", len(papers))
     return papers
@@ -2384,6 +2711,15 @@ def main() -> int:
     cache_enabled = bool(config["cache"]["enabled"])
     cache_path = config["cache"]["path"]
     cache_index = load_cache(cache_path) if cache_enabled else {}
+    publ_query_cache_enabled = bool(config["cache"]["publ_query_enabled"])
+    publ_query_cache_path = config["cache"]["publ_query_path"]
+    publ_query_cache_index = (
+        load_publ_query_cache(publ_query_cache_path) if publ_query_cache_enabled else {}
+    )
+    publ_query_current_year_ttl_hours = float(
+        config["cache"]["publ_query_current_year_ttl_hours"]
+    )
+    publ_query_max_refetch_rounds = int(config["cache"]["publ_query_max_refetch_rounds"])
     client = None if args.no_llm else build_openai_client(config)
 
     if not args.no_llm and client is None:
@@ -2397,7 +2733,7 @@ def main() -> int:
         return 0 if test_ai_configuration(config, client, logger) else 1
 
     logger.info(
-        "Starting crawl for venues=%s years=%s-%s no_llm=%s resume_only=%s limit=%s cache_enabled=%s",
+        "Starting crawl for venues=%s years=%s-%s no_llm=%s resume_only=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s",
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
         config["dblp"]["year_end"],
@@ -2405,6 +2741,8 @@ def main() -> int:
         args.resume_only,
         args.limit,
         cache_enabled,
+        publ_query_cache_enabled,
+        publ_query_max_refetch_rounds,
     )
 
     matched_candidates: List[Dict[str, Any]] = []
@@ -2422,6 +2760,11 @@ def main() -> int:
             year_start=config["dblp"]["year_start"],
             year_end=config["dblp"]["year_end"],
             venue_overrides=config["dblp"].get("venue_stream_overrides", {}),
+            publ_query_cache_path=publ_query_cache_path,
+            publ_query_cache_index=publ_query_cache_index,
+            publ_query_cache_enabled=publ_query_cache_enabled,
+            publ_query_current_year_ttl_hours=publ_query_current_year_ttl_hours,
+            publ_query_max_refetch_rounds=publ_query_max_refetch_rounds,
             session=session,
             request_cfg=config["request"],
             logger=logger,

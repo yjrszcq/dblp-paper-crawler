@@ -83,6 +83,10 @@ output:
 cache:
   enabled: true
   path: "./cache/papers_cache.jsonl"
+  publ_query_enabled: true
+  publ_query_path: "./cache/dblp_publ_cache.json"
+  publ_query_current_year_ttl_hours: 24
+  publ_query_max_refetch_rounds: 2
 
 request:
   sleep_seconds: 1
@@ -101,7 +105,11 @@ request:
 - `llm_output.title_translation_enabled`：是否生成标题中文翻译；关闭后不会翻译，导出的 `标题翻译` 列会写为 `N/A`。
 - `llm_output.summary_language`：摘要总结语言，支持 `zh` 或 `en`。
 - `output.csv_dir`：导出目录。程序会按每个会议/期刊各生成一个 CSV，并统一写到这个目录下。
-- `cache.path`：JSONL 缓存路径，用于断点续爬。
+- `cache.path`：单篇论文处理结果的 JSONL 缓存路径，用于断点续爬。
+- `cache.publ_query_enabled`：是否启用 DBLP `search/publ/api` 的 `venue + year` 结果缓存。
+- `cache.publ_query_path`：DBLP 年度抓取缓存文件路径。只有某个 `venue/year` 完整抓取成功后才会写入，避免把半截结果缓存下来。
+- `cache.publ_query_current_year_ttl_hours`：当前年份的 DBLP 年度缓存有效期，单位小时；历史年份默认长期复用。设为 `0` 或负数时，当前年份也不主动刷新。
+- `cache.publ_query_max_refetch_rounds`：在所有会议/期刊的所有年份完整扫过一轮后，针对仍未完成的 `venue/year` 再重爬的最大轮数。`0` 表示只跑首轮，不做补抓。
 - `request`：外部请求的节流、超时、重试参数。
 
 `dblp` 配置也支持混合写法，例如：
