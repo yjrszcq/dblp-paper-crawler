@@ -169,7 +169,7 @@ python3 dblp_paper_crawler.py --limit 20
 python3 dblp_paper_crawler.py --no-llm --limit 20
 ```
 
-如果你想把配置文件里的 `request.user_agent` 随机换成一个内置浏览器 UA，并立刻用它执行本次任务：
+如果你想把配置文件里的 `request.user_agent` 随机换成一个按浏览器平台、版本号和设备信息拼装出来的浏览器风格 UA，并立刻用它执行本次任务：
 
 ```bash
 python3 dblp_paper_crawler.py --randomize-ua
@@ -324,7 +324,7 @@ AND
 - 单篇论文层面的 `detail / abstract / affiliation / llm` 结果也会优先复用；如果某一步还是 `pending`、`request_failed`、签名失效或配置变了，程序会自动补跑。
 - `not_found` 只表示在本轮所有候选数据源都正常返回、但仍未找到目标字段；像代理失败、429、503、解析失败这类情况会保留为失败状态，后续运行还会继续补。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
-- `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，然后使用新的 UA 继续本次运行。
+- `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后继续本次运行。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
 - 去重优先级为：

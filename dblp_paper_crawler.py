@@ -39,27 +39,6 @@ USER_AGENT = (
     "dblp-paper-crawler/1.0 "
     "(https://dblp.org/; academic metadata enrichment; contact: local-user)"
 )
-DEFAULT_RANDOM_USER_AGENTS = [
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-    ),
-    (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0"
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Edg/124.0.2478.80 Chrome/124.0.0.0 Safari/537.36"
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-]
 DBLP_DEFAULT_BASE_URL = "https://dblp.org"
 CROSSREF_WORKS_API = "https://api.crossref.org/works"
 OPENALEX_WORKS_API = "https://api.openalex.org/works"
@@ -142,8 +121,8 @@ def parse_args() -> argparse.Namespace:
         "--randomize-user-agent",
         action="store_true",
         help=(
-            "Pick a random browser-like User-Agent, write it back to request.user_agent "
-            "in the config file, and use it for this run."
+            "Generate a random browser-like User-Agent from browser/platform/version parts, "
+            "write it back to request.user_agent in the config file, and use it for this run."
         ),
     )
     return parser.parse_args()
@@ -440,12 +419,175 @@ def normalize_sleep_jitter_range(value: Any) -> tuple[float, float]:
     return (lower, upper) if lower <= upper else (upper, lower)
 
 
+def random_choice_weighted(options: List[tuple[str, int]]) -> str:
+    labels = [label for label, _ in options]
+    weights = [weight for _, weight in options]
+    return random.choices(labels, weights=weights, k=1)[0]
+
+
+def random_chrome_version() -> str:
+    major = random.randint(123, 136)
+    build = random.randint(6100, 6999)
+    patch = random.randint(40, 180)
+    return f"{major}.0.{build}.{patch}"
+
+
+def random_edge_version(chrome_version: str) -> str:
+    major = chrome_version.split(".", 1)[0]
+    build = random.randint(2400, 2899)
+    patch = random.randint(20, 120)
+    return f"{major}.0.{build}.{patch}"
+
+
+def random_firefox_version() -> str:
+    major = random.randint(123, 136)
+    return f"{major}.0"
+
+
+def random_safari_version() -> str:
+    major = random.choice([16, 17, 17, 17, 18])
+    minor = random.randint(0, 6)
+    return f"{major}.{minor}"
+
+
+def random_ios_version() -> str:
+    major = random.choice([16, 17, 17, 17, 18])
+    minor = random.randint(0, 6)
+    return f"{major}_{minor}"
+
+
+def random_windows_platform() -> str:
+    return random.choice(
+        [
+            "Windows NT 10.0; Win64; x64",
+            "Windows NT 10.0; WOW64",
+            "Windows NT 10.0; Win64; x64",
+        ]
+    )
+
+
+def random_macos_platform() -> str:
+    return random.choice(
+        [
+            "Macintosh; Intel Mac OS X 10_15_7",
+            "Macintosh; Intel Mac OS X 10_15_7",
+            "Macintosh; Intel Mac OS X 10_15_7",
+        ]
+    )
+
+
+def random_linux_platform() -> str:
+    return random.choice(
+        [
+            "X11; Linux x86_64",
+            "X11; Ubuntu; Linux x86_64",
+            "X11; Linux x86_64",
+        ]
+    )
+
+
+def random_android_platform() -> str:
+    android_version = random.choice(["12", "13", "14", "15"])
+    device = random.choice(
+        [
+            "Pixel 7",
+            "Pixel 8",
+            "Pixel 8 Pro",
+            "SM-S918B",
+            "SM-S928B",
+            "M2102J20SG",
+        ]
+    )
+    return f"Linux; Android {android_version}; {device}"
+
+
+def build_random_chrome_user_agent(platform: str, mobile: bool = False) -> str:
+    chrome_version = random_chrome_version()
+    suffix = " Mobile" if mobile else ""
+    return (
+        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{chrome_version}{suffix} Safari/537.36"
+    )
+
+
+def build_random_edge_user_agent() -> str:
+    platform = random_windows_platform()
+    chrome_version = random_chrome_version()
+    edge_version = random_edge_version(chrome_version)
+    return (
+        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36 Edg/{edge_version}"
+    )
+
+
+def build_random_firefox_user_agent(platform: str) -> str:
+    version = random_firefox_version()
+    return (
+        f"Mozilla/5.0 ({platform}; rv:{version}) "
+        f"Gecko/20100101 Firefox/{version}"
+    )
+
+
+def build_random_safari_user_agent() -> str:
+    platform = random_macos_platform()
+    version = random_safari_version()
+    return (
+        f"Mozilla/5.0 ({platform}) AppleWebKit/605.1.15 "
+        f"(KHTML, like Gecko) Version/{version} Safari/605.1.15"
+    )
+
+
+def build_random_ios_safari_user_agent() -> str:
+    ios_version = random_ios_version()
+    safari_version = ios_version.replace("_", ".")
+    return (
+        f"Mozilla/5.0 (iPhone; CPU iPhone OS {ios_version} like Mac OS X) "
+        f"AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{safari_version} "
+        "Mobile/15E148 Safari/604.1"
+    )
+
+
+def generate_browser_like_user_agent() -> str:
+    profile = random_choice_weighted(
+        [
+            ("windows_chrome", 28),
+            ("mac_chrome", 16),
+            ("linux_chrome", 8),
+            ("windows_edge", 16),
+            ("windows_firefox", 12),
+            ("linux_firefox", 8),
+            ("mac_safari", 8),
+            ("android_chrome", 3),
+            ("ios_safari", 1),
+        ]
+    )
+
+    if profile == "windows_chrome":
+        return build_random_chrome_user_agent(random_windows_platform())
+    if profile == "mac_chrome":
+        return build_random_chrome_user_agent(random_macos_platform())
+    if profile == "linux_chrome":
+        return build_random_chrome_user_agent(random_linux_platform())
+    if profile == "windows_edge":
+        return build_random_edge_user_agent()
+    if profile == "windows_firefox":
+        return build_random_firefox_user_agent(random_windows_platform())
+    if profile == "linux_firefox":
+        return build_random_firefox_user_agent(random_linux_platform())
+    if profile == "mac_safari":
+        return build_random_safari_user_agent()
+    if profile == "android_chrome":
+        return build_random_chrome_user_agent(random_android_platform(), mobile=True)
+    return build_random_ios_safari_user_agent()
+
+
 def choose_random_user_agent(current_user_agent: str = "") -> str:
     current = clean_text(current_user_agent)
-    candidates = [item for item in DEFAULT_RANDOM_USER_AGENTS if clean_text(item) != current]
-    if not candidates:
-        candidates = list(DEFAULT_RANDOM_USER_AGENTS)
-    return random.choice(candidates)
+    for _ in range(8):
+        candidate = generate_browser_like_user_agent()
+        if clean_text(candidate) != current:
+            return candidate
+    return generate_browser_like_user_agent()
 
 
 def yaml_quote_string(value: str) -> str:
