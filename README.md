@@ -71,6 +71,10 @@ openai:
   max_tokens: 800
   max_retries: 3
 
+llm_output:
+  title_translation_enabled: true
+  summary_language: "zh"
+
 output:
   csv_dir: "./outputs"
 
@@ -92,6 +96,8 @@ request:
 - `classification.categories`：候选研究方向标签。
 - `classification.allow_new_category`：当候选标签都不合适时，是否允许 AI 在 `ai_suggested_category` 中建议一个新类别。
 - `openai`：OpenAI 兼容接口参数，必须从配置文件读取，不会硬编码在代码里。
+- `llm_output.title_translation_enabled`：是否生成标题中文翻译；关闭后不会翻译，也不会导出 `标题翻译` 这一列。
+- `llm_output.summary_language`：摘要总结语言，支持 `zh` 或 `en`。
 - `output.csv_dir`：导出目录。程序会按每个会议/期刊各生成一个 CSV，并统一写到这个目录下。
 - `cache.path`：JSONL 缓存路径，用于断点续爬。
 - `request`：外部请求的节流、超时、重试参数。
@@ -163,6 +169,18 @@ python3 dblp_paper_crawler.py --test-ai
 python3 dblp_paper_crawler.py --config /path/to/config.yaml --test-ai
 ```
 
+只从已有缓存继续补齐，不重新抓取新的 DBLP 论文：
+
+```bash
+python3 dblp_paper_crawler.py --resume-only
+```
+
+也可以配合限制条数一起使用：
+
+```bash
+python3 dblp_paper_crawler.py --resume-only --limit 20
+```
+
 ## 4. 关键词匹配规则说明
 
 `match_rules` 是一个二维数组，规则为“组内 OR、组间 AND”。
@@ -219,18 +237,24 @@ AND
 
 这些文件都会统一输出到 `output.csv_dir` 指定的目录中。
 
-每个 CSV 都只包含以下列，且顺序固定：
+每个 CSV 的表头顺序如下：
 
 1. `序号`：导出顺序编号。
 2. `标题`：论文标题。
-3. `作者`：作者列表，使用英文分号 `;` 分隔。
-4. `作者单位`：作者单位列表，使用英文分号 `;` 分隔。
-5. `年份`：论文年份。
-6. `期刊/会议`：期刊或会议名称。
-7. `类别`：模型从候选类别中选择的类别；未调用模型或失败时为 `N/A`。
-8. `AI建议新类别`：仅当 `category=其他` 且允许提出新类别时才可能有值，否则为 `N/A`。
+3. `标题翻译`：仅当 `llm_output.title_translation_enabled: true` 时导出；否则不会出现这一列。
+4. `作者`：作者列表，使用英文分号 `;` 分隔。
+5. `作者单位`：作者单位列表，使用英文分号 `;` 分隔。
+6. `年份`：论文年份。
+7. `期刊/会议`：期刊或会议名称。
+8. `类别`：模型从候选类别中选择的类别；未调用模型或失败时为 `N/A`。
+9. `AI建议新类别`：仅当 `category=其他` 且允许提出新类别时才可能有值，否则为 `N/A`。
+10. `摘要总结`：模型基于摘要生成的总结；语言由 `llm_output.summary_language` 决定。
 
-虽然 CSV 只输出这 8 列，但缓存 JSONL 中会保留更多中间字段，例如：
+当 `llm_output.title_translation_enabled: false` 时，导出列顺序会自动变为：
+
+`序号, 标题, 作者, 作者单位, 年份, 期刊/会议, 类别, AI建议新类别, 摘要总结`
+
+虽然 CSV 只输出这些列，但缓存 JSONL 中会保留更多中间字段，例如：
 
 - `doi`
 - `paper_url`
@@ -238,7 +262,9 @@ AND
 - `abstract`
 - `abstract_source`
 - `abstract_status`
-- `summary_zh`
+- `summary_text`
+- `summary_language`
+- `title_translation`
 - `reason`
 - `llm_status`
 - `affiliation_source`
@@ -255,6 +281,7 @@ AND
 - 每处理完一个阶段，都会把中间结果追加写入缓存。
 - 程序重启后，会优先复用已有成功结果。
 - 如果上一次停在网络失败、解析失败、LLM 失败等中间状态，下一次运行会继续尝试补齐。
+- 如果使用 `--resume-only`，程序不会重新向 DBLP 拉新论文，只会从现有缓存中筛出符合当前配置的记录继续处理。
 - 去重优先级为：
   - DOI
   - DBLP URL
@@ -272,13 +299,16 @@ AND
 - 支持自定义 `max_tokens`
 - 支持 `max_retries`
 - 优先请求 JSON 输出，并在解析失败时做兜底处理
+- 可选生成标题中文翻译
+- 支持将摘要总结输出为中文或英文
 
 分类规则：
 
 - `category` 必须来自 `classification.categories`。
 - 若模型返回了候选类别之外的标签，程序会自动改写为 `其他` 并记日志。
 - 若 `allow_new_category: true` 且候选类别都不合适，则 `category=其他`，`AI建议新类别` 可以写入一个简短建议。
-- 如果没有摘要，则不会调用模型，`类别` 和 `AI建议新类别` 都是 `N/A`。
+- 如果没有摘要但开启了标题翻译，程序仍可只翻译标题；这时 `类别`、`AI建议新类别` 和 `摘要总结` 都会是 `N/A`。
+- 如果没有摘要且标题翻译也关闭，则不会调用模型，`类别`、`AI建议新类别` 和 `摘要总结` 都是 `N/A`。
 - 如果模型接口调用失败，`类别` 和 `AI建议新类别` 也会是 `N/A`。
 
 如果 OpenAI 兼容接口报错，请重点检查：

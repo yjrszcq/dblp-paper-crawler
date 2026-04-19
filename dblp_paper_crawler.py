@@ -67,6 +67,11 @@ def parse_args() -> argparse.Namespace:
         help="Only test whether the OpenAI-compatible API configuration works, then exit.",
     )
     parser.add_argument(
+        "--resume-only",
+        action="store_true",
+        help="Do not fetch new DBLP records. Resume processing only from existing cache records.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -81,6 +86,15 @@ def configure_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def normalize_language_code(value: Any, default: str = "zh") -> str:
+    text = clean_text(value).lower()
+    if text in {"zh", "zh-cn", "zh_hans", "cn", "chinese", "中文"}:
+        return "zh"
+    if text in {"en", "en-us", "en_gb", "english", "英文"}:
+        return "en"
+    return default
 
 
 def extract_override_value(value: Any) -> str:
@@ -179,6 +193,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         "match_rules": raw.get("match_rules", []) or [],
         "classification": raw.get("classification", {}) or {},
         "openai": raw.get("openai", {}) or {},
+        "llm_output": raw.get("llm_output", {}) or {},
         "output": raw.get("output", {}) or {},
         "cache": raw.get("cache", {}) or {},
         "request": raw.get("request", {}) or {},
@@ -221,6 +236,15 @@ def load_config(config_path: str) -> Dict[str, Any]:
     openai_cfg["temperature"] = float(openai_cfg.get("temperature", 0.2))
     openai_cfg["max_tokens"] = int(openai_cfg.get("max_tokens", 800))
     openai_cfg["max_retries"] = int(openai_cfg.get("max_retries", 3))
+
+    llm_output_cfg = config["llm_output"]
+    llm_output_cfg["title_translation_enabled"] = bool(
+        llm_output_cfg.get("title_translation_enabled", False)
+    )
+    llm_output_cfg["summary_language"] = normalize_language_code(
+        llm_output_cfg.get("summary_language", "zh"),
+        default="zh",
+    )
 
     output_cfg = config["output"]
     raw_csv_dir = output_cfg.get("csv_dir")
@@ -756,7 +780,11 @@ def parse_paper_from_search_hit(hit: Dict[str, Any], venue_hint: str) -> Optiona
         "abstract": NA,
         "abstract_source": NA,
         "abstract_status": "pending",
+        "summary_text": NA,
+        "summary_language": NA,
         "summary_zh": NA,
+        "title_translation": NA,
+        "title_translation_status": "pending",
         "category": NA,
         "ai_suggested_category": NA,
         "reason": NA,
@@ -1616,55 +1644,100 @@ def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_summary_text(record: Dict[str, Any]) -> str:
+    summary_text = clean_text(record.get("summary_text"))
+    if summary_text:
+        return summary_text
+    legacy_summary = clean_text(record.get("summary_zh"))
+    if legacy_summary:
+        return legacy_summary
+    return NA
+
+
+def build_llm_default_result(config: Dict[str, Any], llm_status: str) -> Dict[str, str]:
+    title_translation_enabled = bool(config["llm_output"]["title_translation_enabled"])
+    summary_language = config["llm_output"]["summary_language"]
+    return {
+        "title_translation": NA,
+        "title_translation_status": "disabled" if not title_translation_enabled else llm_status,
+        "summary_text": NA,
+        "summary_language": summary_language,
+        "summary_zh": NA,
+        "category": NA,
+        "ai_suggested_category": NA,
+        "reason": NA,
+        "llm_status": llm_status,
+    }
+
+
 def summarize_and_classify(
     paper: Dict[str, Any],
     config: Dict[str, Any],
     client: Optional[OpenAI],
     logger: logging.Logger,
 ) -> Dict[str, str]:
+    title = clean_text(paper.get("title"))
     abstract = clean_text(paper.get("abstract"))
-    if not abstract or abstract == NA:
-        return {
-            "summary_zh": NA,
-            "category": NA,
-            "ai_suggested_category": NA,
-            "reason": NA,
-            "llm_status": "no_abstract",
-        }
+    title_translation_enabled = bool(config["llm_output"]["title_translation_enabled"])
+    summary_language = config["llm_output"]["summary_language"]
+    has_abstract = bool(abstract and abstract != NA)
+
+    if not title and not has_abstract:
+        return build_llm_default_result(config, "missing_input")
+
+    if not has_abstract and not title_translation_enabled:
+        return build_llm_default_result(config, "no_abstract")
 
     if client is None:
-        return {
-            "summary_zh": NA,
-            "category": NA,
-            "ai_suggested_category": NA,
-            "reason": NA,
-            "llm_status": "llm_unavailable",
-        }
+        return build_llm_default_result(config, "llm_unavailable")
 
     categories = config["classification"]["categories"]
     allow_new_category = bool(config["classification"]["allow_new_category"])
     openai_cfg = config["openai"]
+    summary_language_name = "中文" if summary_language == "zh" else "英文"
 
     system_prompt = (
         "你是一名严谨的计算机领域论文分析助手。"
         "你必须只输出一个 JSON 对象，不能输出 Markdown、解释或多余文本。"
     )
-    user_prompt = (
-        "请根据论文标题和摘要，完成中文总结和研究方向归类。\n"
-        f"候选类别：{json.dumps(categories, ensure_ascii=False)}\n"
-        f"是否允许提出新类别：{allow_new_category}\n"
+    prompt_lines = [
+        "请根据论文标题和摘要，完成标题翻译、摘要总结和研究方向归类。",
+        f"候选类别：{json.dumps(categories, ensure_ascii=False)}",
+        f"是否允许提出新类别：{allow_new_category}",
         "输出 JSON，且必须包含以下字符串字段："
-        'summary_zh, category, ai_suggested_category, reason。\n'
-        "规则：\n"
-        "1. category 必须从候选类别中选择一个。\n"
-        '2. 如果候选类别中没有合适项，则 category 必须为 "其他"。\n'
-        '3. 只有在允许提出新类别且 category 为 "其他" 时，ai_suggested_category 才能填写简短新类别，否则必须写 "N/A"。\n'
-        '4. 如果已有候选类别合适，则 ai_suggested_category 必须写 "N/A"。\n'
-        "5. summary_zh 用中文简洁总结论文核心内容。\n"
-        "6. reason 用中文简要说明分类依据。\n\n"
-        f"标题：{paper.get('title', NA)}\n"
-        f"摘要：{abstract}"
+        "title_translation, summary_text, category, ai_suggested_category, reason。",
+        "规则：",
+    ]
+    if title_translation_enabled:
+        prompt_lines.append('1. title_translation 填写论文标题的中文翻译。')
+    else:
+        prompt_lines.append('1. title_translation 必须写 "N/A"。')
+    if has_abstract:
+        prompt_lines.extend(
+            [
+                f"2. summary_text 用{summary_language_name}简洁总结论文核心内容。",
+                "3. category 必须从候选类别中选择一个。",
+                '4. 如果候选类别中没有合适项，则 category 必须为 "其他"。',
+                '5. 只有在允许提出新类别且 category 为 "其他" 时，ai_suggested_category 才能填写简短新类别，否则必须写 "N/A"。',
+                '6. 如果已有候选类别合适，则 ai_suggested_category 必须写 "N/A"。',
+                "7. reason 用中文简要说明分类依据。",
+            ]
+        )
+    else:
+        prompt_lines.extend(
+            [
+                '2. 当前没有摘要，因此 summary_text、category、ai_suggested_category、reason 都必须写 "N/A"。',
+                "3. 仅完成标题翻译，不要基于标题猜测分类。",
+            ]
+        )
+    prompt_lines.extend(
+        [
+            "",
+            f"标题：{title or NA}",
+            f"摘要：{abstract if has_abstract else NA}",
+        ]
     )
+    user_prompt = "\n".join(prompt_lines)
 
     max_retries = int(openai_cfg.get("max_retries", 3))
     errors: List[str] = []
@@ -1692,10 +1765,35 @@ def summarize_and_classify(
             if not payload:
                 raise ValueError("Model did not return valid JSON content.")
 
-            summary_zh = clean_text(payload.get("summary_zh")) or NA
-            category = clean_text(payload.get("category")) or "其他"
+            title_translation = clean_text(payload.get("title_translation")) or NA
+            summary_text = clean_text(payload.get("summary_text")) or NA
+            category = clean_text(payload.get("category")) or ("其他" if has_abstract else NA)
             ai_suggested_category = clean_text(payload.get("ai_suggested_category")) or NA
             reason = clean_text(payload.get("reason")) or NA
+            title_translation_status = "disabled"
+
+            if title_translation_enabled:
+                title_translation_status = "success" if title_translation != NA else "missing"
+            else:
+                title_translation = NA
+
+            if not has_abstract:
+                summary_text = NA
+                category = NA
+                ai_suggested_category = NA
+                reason = NA
+                llm_status = "translated_only" if title_translation_enabled else "no_abstract"
+                return {
+                    "title_translation": title_translation,
+                    "title_translation_status": title_translation_status,
+                    "summary_text": summary_text,
+                    "summary_language": summary_language,
+                    "summary_zh": NA,
+                    "category": category,
+                    "ai_suggested_category": ai_suggested_category,
+                    "reason": reason,
+                    "llm_status": llm_status,
+                }
 
             if category not in categories:
                 logger.warning(
@@ -1713,7 +1811,11 @@ def summarize_and_classify(
                 ai_suggested_category = NA
 
             return {
-                "summary_zh": summary_zh,
+                "title_translation": title_translation,
+                "title_translation_status": title_translation_status,
+                "summary_text": summary_text,
+                "summary_language": summary_language,
+                "summary_zh": summary_text if summary_language == "zh" else NA,
                 "category": category,
                 "ai_suggested_category": ai_suggested_category,
                 "reason": reason,
@@ -1735,13 +1837,7 @@ def summarize_and_classify(
         paper.get("title", NA),
         " | ".join(errors[-3:]) if errors else "unknown error",
     )
-    return {
-        "summary_zh": NA,
-        "category": NA,
-        "ai_suggested_category": NA,
-        "reason": NA,
-        "llm_status": "failed",
-    }
+    return build_llm_default_result(config, "failed")
 
 
 def test_ai_configuration(
@@ -1833,11 +1929,26 @@ def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
     return True
 
 
-def should_refresh_llm(record: Dict[str, Any], no_llm: bool) -> bool:
+def should_refresh_llm(record: Dict[str, Any], no_llm: bool, config: Dict[str, Any]) -> bool:
     status = clean_text(record.get("llm_status")).lower()
     if no_llm and status == "no_llm":
         return False
-    if status in {"success", "no_abstract", "no_llm"}:
+    title_translation_enabled = bool(config["llm_output"]["title_translation_enabled"])
+    target_summary_language = config["llm_output"]["summary_language"]
+    has_abstract = clean_text(record.get("abstract")) not in {"", NA}
+    title_translation_missing = (
+        title_translation_enabled
+        and clean_text(record.get("title_translation")) in {"", NA}
+    )
+    summary_missing = has_abstract and get_summary_text(record) in {"", NA}
+    summary_language_mismatch = (
+        has_abstract
+        and clean_text(record.get("summary_language")).lower() not in {"", target_summary_language}
+    )
+
+    if title_translation_missing or summary_missing or summary_language_mismatch:
+        return True
+    if status in {"success", "translated_only", "no_abstract", "no_llm"}:
         return False
     return True
 
@@ -1872,7 +1983,8 @@ def sanitize_filename(value: str) -> str:
     return text or "unknown_venue"
 
 
-def build_csv_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_csv_rows(records: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    include_title_translation = bool(config["llm_output"]["title_translation_enabled"])
     deduped: Dict[str, Dict[str, Any]] = {}
     for record in records:
         if record.get("skip_export"):
@@ -1894,27 +2006,29 @@ def build_csv_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for idx, record in enumerate(ordered, start=1):
         authors = record.get("authors") or []
         affiliations = record.get("affiliations") or [NA]
-        rows.append(
-            {
-                "序号": idx,
-                "标题": clean_text(record.get("title")) or NA,
-                "作者": "; ".join(clean_text(author) for author in authors if clean_text(author)) or NA,
-                "作者单位": "; ".join(
-                    clean_text(affiliation)
-                    for affiliation in affiliations
-                    if clean_text(affiliation)
-                )
-                or NA,
-                "年份": safe_int(record.get("year")) or NA,
-                "期刊/会议": clean_text(record.get("venue")) or NA,
-                "类别": clean_text(record.get("category")) or NA,
-                "AI建议新类别": clean_text(record.get("ai_suggested_category")) or NA,
-            }
-        )
+        row = {
+            "序号": idx,
+            "标题": clean_text(record.get("title")) or NA,
+            "作者": "; ".join(clean_text(author) for author in authors if clean_text(author)) or NA,
+            "作者单位": "; ".join(
+                clean_text(affiliation)
+                for affiliation in affiliations
+                if clean_text(affiliation)
+            )
+            or NA,
+            "年份": safe_int(record.get("year")) or NA,
+            "期刊/会议": clean_text(record.get("venue")) or NA,
+            "类别": clean_text(record.get("category")) or NA,
+            "AI建议新类别": clean_text(record.get("ai_suggested_category")) or NA,
+            "摘要总结": get_summary_text(record),
+        }
+        if include_title_translation:
+            row["标题翻译"] = clean_text(record.get("title_translation")) or NA
+        rows.append(row)
     return rows
 
 
-def export_csv(records: List[Dict[str, Any]], csv_dir: str, logger: logging.Logger) -> int:
+def export_csv(records: List[Dict[str, Any]], csv_dir: str, config: Dict[str, Any], logger: logging.Logger) -> int:
     output_dir = Path(csv_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1925,20 +2039,16 @@ def export_csv(records: List[Dict[str, Any]], csv_dir: str, logger: logging.Logg
         source_venue = first_non_empty(record.get("source_venue"), record.get("venue"))
         grouped_records.setdefault(source_venue, []).append(record)
 
-    fieldnames = [
-        "序号",
-        "标题",
-        "作者",
-        "作者单位",
-        "年份",
-        "期刊/会议",
-        "类别",
-        "AI建议新类别",
-    ]
+    fieldnames = ["序号", "标题"]
+    if bool(config["llm_output"]["title_translation_enabled"]):
+        fieldnames.append("标题翻译")
+    fieldnames.extend(
+        ["作者", "作者单位", "年份", "期刊/会议", "类别", "AI建议新类别", "摘要总结"]
+    )
 
     total_rows = 0
     for source_venue, venue_records in sorted(grouped_records.items(), key=lambda item: clean_text(item[0])):
-        rows = build_csv_rows(venue_records)
+        rows = build_csv_rows(venue_records, config)
         file_path = output_dir / f"{sanitize_filename(source_venue)}.csv"
         with file_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -1951,6 +2061,55 @@ def export_csv(records: List[Dict[str, Any]], csv_dir: str, logger: logging.Logg
     return total_rows
 
 
+def collect_unique_cached_records(cache_index: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unique_records: Dict[str, Dict[str, Any]] = {}
+    for cached_record in cache_index.values():
+        normalized = sanitize_record_for_cache(cached_record)
+        dedupe_key = normalized.get("dedupe_key") or compute_primary_dedupe_key(normalized)
+        if not dedupe_key:
+            continue
+        unique_records[dedupe_key] = normalized
+    return list(unique_records.values())
+
+
+def collect_resume_candidates(
+    cache_index: Dict[str, Dict[str, Any]],
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    venues = set(config["dblp"]["venues"])
+    year_start = config["dblp"]["year_start"]
+    year_end = config["dblp"]["year_end"]
+    candidates: List[Dict[str, Any]] = []
+
+    for record in collect_unique_cached_records(cache_index):
+        source_venue = first_non_empty(record.get("source_venue"), record.get("venue"))
+        if source_venue not in venues:
+            continue
+
+        year = safe_int(record.get("year"))
+        if year is not None and not (year_start <= year <= year_end):
+            continue
+
+        title = clean_text(record.get("title"))
+        if not title:
+            continue
+
+        record["matched"] = match_title(title, config["match_rules"])
+        record["normalized_title"] = normalize_title(title)
+        if record["matched"]:
+            candidates.append(record)
+
+    logger.info(
+        "Resume-only mode loaded %s matched cached papers for venues=%s years=%s-%s",
+        len(candidates),
+        config["dblp"]["venues"],
+        year_start,
+        year_end,
+    )
+    return candidates
+
+
 def main() -> int:
     args = parse_args()
     configure_logging()
@@ -1959,7 +2118,6 @@ def main() -> int:
     if args.no_llm and args.test_ai:
         logger.error("--no-llm and --test-ai cannot be used together.")
         return 1
-
     try:
         config = load_config(args.config)
     except Exception as exc:
@@ -1983,41 +2141,51 @@ def main() -> int:
         return 0 if test_ai_configuration(config, client, logger) else 1
 
     logger.info(
-        "Starting crawl for venues=%s years=%s-%s no_llm=%s limit=%s cache_enabled=%s",
+        "Starting crawl for venues=%s years=%s-%s no_llm=%s resume_only=%s limit=%s cache_enabled=%s",
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
         config["dblp"]["year_end"],
         args.no_llm,
+        args.resume_only,
         args.limit,
         cache_enabled,
     )
 
-    papers = fetch_papers_from_dblp(
-        venues=config["dblp"]["venues"],
-        year_start=config["dblp"]["year_start"],
-        year_end=config["dblp"]["year_end"],
-        venue_overrides=config["dblp"].get("venue_stream_overrides", {}),
-        session=session,
-        request_cfg=config["request"],
-        logger=logger,
-    )
-
     matched_candidates: List[Dict[str, Any]] = []
-    for paper in papers:
-        cached = lookup_cached_record(cache_index, paper) or {}
-        record = merge_record(paper, cached)
-        record["matched"] = match_title(record.get("title", ""), config["match_rules"])
-        record["normalized_title"] = normalize_title(record.get("title", ""))
-        logger.info(
-            "Title match=%s | venue=%s | year=%s | title=%s",
-            record["matched"],
-            record.get("venue", NA),
-            record.get("year", NA),
-            record.get("title", NA),
+    if args.resume_only:
+        if not cache_enabled:
+            logger.error("--resume-only requires cache.enabled=true in the config.")
+            return 1
+        if not cache_index:
+            logger.warning("Resume-only mode found no cache records to process.")
+            return 0
+        matched_candidates = collect_resume_candidates(cache_index, config, logger)
+    else:
+        papers = fetch_papers_from_dblp(
+            venues=config["dblp"]["venues"],
+            year_start=config["dblp"]["year_start"],
+            year_end=config["dblp"]["year_end"],
+            venue_overrides=config["dblp"].get("venue_stream_overrides", {}),
+            session=session,
+            request_cfg=config["request"],
+            logger=logger,
         )
-        append_cache_record(record, cache_path, cache_index, cache_enabled)
-        if record["matched"]:
-            matched_candidates.append(record)
+
+        for paper in papers:
+            cached = lookup_cached_record(cache_index, paper) or {}
+            record = merge_record(paper, cached)
+            record["matched"] = match_title(record.get("title", ""), config["match_rules"])
+            record["normalized_title"] = normalize_title(record.get("title", ""))
+            logger.info(
+                "Title match=%s | venue=%s | year=%s | title=%s",
+                record["matched"],
+                record.get("venue", NA),
+                record.get("year", NA),
+                record.get("title", NA),
+            )
+            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            if record["matched"]:
+                matched_candidates.append(record)
 
     if args.limit is not None:
         matched_candidates = matched_candidates[: max(args.limit, 0)]
@@ -2047,7 +2215,7 @@ def main() -> int:
             and not need_detail
             and not should_refresh_abstract(record)
             and not should_refresh_affiliations(record)
-            and (args.no_llm or not should_refresh_llm(record, args.no_llm))
+            and (args.no_llm or not should_refresh_llm(record, args.no_llm, config))
         ):
             processed_records.append(record)
             exportable_count += 1
@@ -2105,6 +2273,14 @@ def main() -> int:
         if args.no_llm:
             record.update(
                 {
+                    "title_translation": NA,
+                    "title_translation_status": (
+                        "disabled"
+                        if not config["llm_output"]["title_translation_enabled"]
+                        else "no_llm"
+                    ),
+                    "summary_text": NA,
+                    "summary_language": config["llm_output"]["summary_language"],
                     "summary_zh": NA,
                     "category": NA,
                     "ai_suggested_category": NA,
@@ -2113,7 +2289,7 @@ def main() -> int:
                 }
             )
             append_cache_record(record, cache_path, cache_index, cache_enabled)
-        elif should_refresh_llm(record, args.no_llm):
+        elif should_refresh_llm(record, args.no_llm, config):
             llm_info = summarize_and_classify(record, config, client, logger)
             record = merge_record(llm_info, record)
             append_cache_record(record, cache_path, cache_index, cache_enabled)
@@ -2127,7 +2303,7 @@ def main() -> int:
         exportable_count += 1
         logger.info("Current exportable paper count=%s", exportable_count)
 
-    csv_count = export_csv(processed_records, config["output"]["csv_dir"], logger)
+    csv_count = export_csv(processed_records, config["output"]["csv_dir"], config, logger)
     logger.info("Done. CSV rows written=%s", csv_count)
     return 0
 

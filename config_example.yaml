@@ -45,6 +45,10 @@ openai:
   max_tokens: 500
   max_retries: 3
 
+llm_output:
+  title_translation_enabled: true
+  summary_language: "zh"
+
 output:
   csv_dir: "./outputs"
 
