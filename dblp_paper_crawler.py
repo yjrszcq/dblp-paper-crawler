@@ -39,8 +39,7 @@ USER_AGENT = (
     "dblp-paper-crawler/1.0 "
     "(https://dblp.org/; academic metadata enrichment; contact: local-user)"
 )
-DBLP_VENUE_API = "https://dblp.org/search/venue/api"
-DBLP_PUBL_API = "https://dblp.org/search/publ/api"
+DBLP_DEFAULT_BASE_URL = "https://dblp.org"
 CROSSREF_WORKS_API = "https://api.crossref.org/works"
 OPENALEX_WORKS_API = "https://api.openalex.org/works"
 SEMANTIC_SCHOLAR_PAPER_API = "https://api.semanticscholar.org/graph/v1/paper"
@@ -181,6 +180,38 @@ def normalize_venue_stream_overrides(raw_overrides: Any) -> Dict[str, str]:
     return overrides
 
 
+def normalize_base_url(value: Any, default: str = DBLP_DEFAULT_BASE_URL) -> str:
+    text = clean_text(value).strip() or default
+    if not re.match(r"^https?://", text, flags=re.IGNORECASE):
+        text = f"https://{text.lstrip('/')}"
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("dblp.base_url must be a valid http(s) URL")
+    path = parsed.path.rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def build_dblp_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def rewrite_dblp_url(url: Any, dblp_base_url: str) -> str:
+    text = clean_text(url)
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        if not is_dblp_host(parsed.netloc, dblp_base_url):
+            return text
+        rewritten = build_dblp_url(dblp_base_url, parsed.path)
+        if parsed.query:
+            rewritten = f"{rewritten}?{parsed.query}"
+        if parsed.fragment:
+            rewritten = f"{rewritten}#{parsed.fragment}"
+        return rewritten
+    return build_dblp_url(dblp_base_url, text)
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     path = Path(config_path).expanduser().resolve()
     if not path.exists():
@@ -201,6 +232,9 @@ def load_config(config_path: str) -> Dict[str, Any]:
     }
 
     dblp_cfg = config["dblp"]
+    dblp_cfg["base_url"] = normalize_base_url(dblp_cfg.get("base_url", DBLP_DEFAULT_BASE_URL))
+    dblp_cfg["venue_api_url"] = build_dblp_url(dblp_cfg["base_url"], "search/venue/api")
+    dblp_cfg["publ_api_url"] = build_dblp_url(dblp_cfg["base_url"], "search/publ/api")
     venues, implicit_overrides = normalize_venues_config(dblp_cfg.get("venues", []))
     dblp_cfg["venues"] = venues
     dblp_cfg["year_start"] = int(dblp_cfg.get("year_start", 2000))
@@ -471,10 +505,30 @@ def make_fingerprint(*parts: Any) -> str:
     return hasher.hexdigest()
 
 
+def extract_dblp_record_key(url: Any) -> str:
+    text = clean_text(url)
+    if not text or text == NA:
+        return ""
+    path = urlparse(text).path or text
+    if "/rec/" in path:
+        key = path.split("/rec/", 1)[1]
+    elif path.startswith("rec/"):
+        key = path[len("rec/") :]
+    else:
+        return ""
+    key = key.strip("/")
+    if key.endswith(".xml"):
+        key = key[:-4]
+    return key
+
+
 def compute_primary_dedupe_key(record: Dict[str, Any]) -> str:
     doi = normalize_doi(record.get("doi"))
     if doi:
         return f"doi:{doi}"
+    dblp_record_key = extract_dblp_record_key(record.get("dblp_url"))
+    if dblp_record_key:
+        return f"dblp_key:{dblp_record_key}"
     dblp_url = clean_text(record.get("dblp_url"))
     if dblp_url and dblp_url != NA:
         return f"dblp:{dblp_url}"
@@ -487,10 +541,13 @@ def compute_primary_dedupe_key(record: Dict[str, Any]) -> str:
 def make_record_keys(record: Dict[str, Any]) -> List[str]:
     keys: List[str] = []
     doi = normalize_doi(record.get("doi"))
+    dblp_record_key = extract_dblp_record_key(record.get("dblp_url"))
     dblp_url = clean_text(record.get("dblp_url"))
     normalized_title = normalize_title(record.get("title", ""))
     if doi:
         keys.append(f"doi:{doi}")
+    if dblp_record_key:
+        keys.append(f"dblp_key:{dblp_record_key}")
     if dblp_url and dblp_url != NA:
         keys.append(f"dblp:{dblp_url}")
     if normalized_title:
@@ -728,11 +785,25 @@ def can_reuse_publ_query_cache_entry(
 
 
 def normalize_hostname(url: str) -> str:
-    parsed = urlparse(clean_text(url))
-    host = parsed.netloc.lower().strip()
+    text = clean_text(url)
+    if not text:
+        return ""
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    host = (parsed.netloc or parsed.path).lower().strip()
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def is_dblp_host(value: str, configured_base_url: str = "") -> bool:
+    host = normalize_hostname(value)
+    if not host:
+        return False
+    configured_host = normalize_hostname(configured_base_url)
+    known_hosts = {"dblp.org", "dblp.uni-trier.de"}
+    if configured_host:
+        known_hosts.add(configured_host)
+    return host in known_hosts or host.endswith(".dblp.org") or host.startswith("dblp.")
 
 
 def is_doi_url(url: str) -> bool:
@@ -742,9 +813,9 @@ def is_doi_url(url: str) -> bool:
 
 def is_metadata_url(url: str) -> bool:
     host = normalize_hostname(url)
+    if is_dblp_host(host):
+        return True
     metadata_hosts = {
-        "dblp.org",
-        "dblp.uni-trier.de",
         "wikidata.org",
         "openalex.org",
         "crossref.org",
@@ -848,6 +919,7 @@ def resolve_stream_query_from_html(html_text: str) -> Optional[str]:
 
 def resolve_override_stream_query(
     override: str,
+    dblp_base_url: str,
     session: requests.Session,
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
@@ -867,7 +939,9 @@ def resolve_override_stream_query(
 
     parsed = urlparse(value)
     if parsed.scheme in {"http", "https"}:
-        if "dblp.org" in parsed.netloc or "dblp.uni-trier.de" in parsed.netloc:
+        if is_dblp_host(parsed.netloc, dblp_base_url):
+            value = rewrite_dblp_url(value, dblp_base_url)
+            parsed = urlparse(value)
             if parsed.path.startswith("/search"):
                 q_value = parse_qs(parsed.query).get("q", [])
                 if q_value:
@@ -885,6 +959,8 @@ def resolve_override_stream_query(
 def resolve_venue(
     venue_name: str,
     overrides: Dict[str, str],
+    dblp_base_url: str,
+    dblp_venue_api_url: str,
     session: requests.Session,
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
@@ -892,7 +968,7 @@ def resolve_venue(
     override_value = overrides.get(venue_name)
     if override_value:
         resolved_override = resolve_override_stream_query(
-            override_value, session, request_cfg, logger
+            override_value, dblp_base_url, session, request_cfg, logger
         )
         if resolved_override:
             resolved_override["input_venue"] = venue_name
@@ -902,7 +978,7 @@ def resolve_venue(
 
     payload = request_json(
         session,
-        DBLP_VENUE_API,
+        dblp_venue_api_url,
         request_cfg,
         logger,
         params={"q": venue_name, "format": "json", "h": 10, "c": 0},
@@ -911,11 +987,11 @@ def resolve_venue(
     candidates: List[Dict[str, Any]] = []
     for hit in hits:
         info = hit.get("info", hit)
-        candidate_url = clean_text(info.get("url"))
+        candidate_url = rewrite_dblp_url(info.get("url"), dblp_base_url)
         if not candidate_url or candidate_url == NA:
             key = clean_text(info.get("key"))
             if key:
-                candidate_url = f"https://dblp.org/{key}"
+                candidate_url = build_dblp_url(dblp_base_url, key)
         if not candidate_url or candidate_url == NA:
             continue
         score = score_venue_candidate(venue_name, info, candidate_url)
@@ -972,16 +1048,20 @@ def should_skip_search_hit(info: Dict[str, Any]) -> bool:
     return any(marker in type_text for marker in skip_markers)
 
 
-def parse_paper_from_search_hit(hit: Dict[str, Any], venue_hint: str) -> Optional[Dict[str, Any]]:
+def parse_paper_from_search_hit(
+    hit: Dict[str, Any],
+    venue_hint: str,
+    dblp_base_url: str,
+) -> Optional[Dict[str, Any]]:
     info = hit.get("info", hit)
     if should_skip_search_hit(info):
         return None
 
     title = clean_text(info.get("title"))
-    dblp_url = clean_text(info.get("url"))
+    dblp_url = rewrite_dblp_url(info.get("url"), dblp_base_url)
     key = clean_text(info.get("key"))
     if not dblp_url and key:
-        dblp_url = f"https://dblp.org/rec/{key}"
+        dblp_url = build_dblp_url(dblp_base_url, f"rec/{key}")
     if not title or not dblp_url:
         return None
 
@@ -1038,6 +1118,8 @@ def fetch_dblp_papers_for_venue_year(
     venue_name: str,
     stream_query: str,
     year: int,
+    dblp_base_url: str,
+    dblp_publ_api_url: str,
     session: requests.Session,
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
@@ -1050,7 +1132,7 @@ def fetch_dblp_papers_for_venue_year(
     while True:
         payload = request_json(
             session,
-            DBLP_PUBL_API,
+            dblp_publ_api_url,
             request_cfg,
             logger,
             params={
@@ -1075,7 +1157,7 @@ def fetch_dblp_papers_for_venue_year(
             return year_papers, True
 
         for hit in hits:
-            paper = parse_paper_from_search_hit(hit, venue_name)
+            paper = parse_paper_from_search_hit(hit, venue_name, dblp_base_url)
             if paper:
                 year_papers.append(paper)
 
@@ -1089,6 +1171,9 @@ def fetch_papers_from_dblp(
     year_start: int,
     year_end: int,
     venue_overrides: Dict[str, str],
+    dblp_base_url: str,
+    dblp_venue_api_url: str,
+    dblp_publ_api_url: str,
     publ_query_cache_path: str,
     publ_query_cache_index: Dict[str, Dict[str, Any]],
     publ_query_cache_enabled: bool,
@@ -1142,7 +1227,15 @@ def fetch_papers_from_dblp(
 
             resolved = resolved_venues.get(venue_name)
             if not resolved:
-                resolved = resolve_venue(venue_name, venue_overrides, session, request_cfg, logger)
+                resolved = resolve_venue(
+                    venue_name,
+                    venue_overrides,
+                    dblp_base_url,
+                    dblp_venue_api_url,
+                    session,
+                    request_cfg,
+                    logger,
+                )
                 if resolved:
                     resolved_venues[venue_name] = resolved
             if not resolved:
@@ -1183,6 +1276,8 @@ def fetch_papers_from_dblp(
                     venue_name,
                     stream_query,
                     year,
+                    dblp_base_url,
+                    dblp_publ_api_url,
                     session,
                     request_cfg,
                     logger,
@@ -2733,7 +2828,8 @@ def main() -> int:
         return 0 if test_ai_configuration(config, client, logger) else 1
 
     logger.info(
-        "Starting crawl for venues=%s years=%s-%s no_llm=%s resume_only=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s resume_only=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s",
+        config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
         config["dblp"]["year_end"],
@@ -2760,6 +2856,9 @@ def main() -> int:
             year_start=config["dblp"]["year_start"],
             year_end=config["dblp"]["year_end"],
             venue_overrides=config["dblp"].get("venue_stream_overrides", {}),
+            dblp_base_url=config["dblp"]["base_url"],
+            dblp_venue_api_url=config["dblp"]["venue_api_url"],
+            dblp_publ_api_url=config["dblp"]["publ_api_url"],
             publ_query_cache_path=publ_query_cache_path,
             publ_query_cache_index=publ_query_cache_index,
             publ_query_cache_enabled=publ_query_cache_enabled,

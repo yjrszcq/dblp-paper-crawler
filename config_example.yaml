@@ -4,6 +4,7 @@
 #   python3 dblp_paper_crawler.py --config config_example.yaml --no-llm --limit 20
 
 dblp:
+  base_url: "https://dblp.org"
   venues:
     TPAMI:
       enabled: false

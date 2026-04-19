@@ -32,6 +32,7 @@ pip install -r requirements.txt
 
 ```yaml
 dblp:
+  base_url: "https://dblp.org"
   venues:
     TPAMI:
       enabled: false
@@ -96,6 +97,7 @@ request:
 
 说明：
 
+- `dblp.base_url`：DBLP 根路径，默认是 `https://dblp.org`。如果主站不稳定，可以改成镜像站，例如 `https://dblp.uni-trier.de/`。程序会基于它自动拼接 `search/venue/api`、`search/publ/api` 和回退用的 DBLP `rec` 链接。
 - `dblp.venues`：推荐使用融合后的 `map` 风格配置。键是会议/期刊名，值可以是 `true/false`，也可以是对象，例如 `enabled: true`、`stream_query: ...`。`url: ...` 仍兼容，但更推荐直接写 `stream_query`，更稳定，也能减少一次 HTML 解析请求。
 - `dblp.year_start` / `dblp.year_end`：抓取年份范围，闭区间。
 - `match_rules`：标题关键词匹配规则。可以配置多个规则组，每个 `[]` 内可以写多个关键词。
