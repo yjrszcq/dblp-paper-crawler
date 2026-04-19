@@ -1657,8 +1657,8 @@ def get_summary_text(record: Dict[str, Any]) -> str:
 def get_export_link(record: Dict[str, Any]) -> str:
     doi = normalize_doi(record.get("doi"))
     return first_non_empty(
-        record.get("paper_url"),
         f"https://doi.org/{doi}" if doi else "",
+        record.get("paper_url"),
         record.get("dblp_url"),
     )
 
