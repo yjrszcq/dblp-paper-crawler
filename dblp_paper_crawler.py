@@ -195,21 +195,42 @@ def build_dblp_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
+def get_dblp_base_path(dblp_base_url: str) -> str:
+    text = clean_text(dblp_base_url)
+    if not text:
+        return ""
+    parsed = urlparse(text if "://" in text else f"https://{text.lstrip('/')}")
+    return parsed.path.rstrip("/")
+
+
+def strip_dblp_base_path(path: str, dblp_base_url: str) -> str:
+    current_path = clean_text(path)
+    base_path = get_dblp_base_path(dblp_base_url)
+    if not current_path or not base_path:
+        return current_path
+    if current_path == base_path:
+        return "/"
+    if current_path.startswith(f"{base_path}/"):
+        stripped = current_path[len(base_path) :]
+        return stripped or "/"
+    return current_path
+
+
 def rewrite_dblp_url(url: Any, dblp_base_url: str) -> str:
     text = clean_text(url)
     if not text:
         return ""
     parsed = urlparse(text)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
-        if not is_dblp_host(parsed.netloc, dblp_base_url):
+        if not is_dblp_url(text, dblp_base_url):
             return text
-        rewritten = build_dblp_url(dblp_base_url, parsed.path)
+        rewritten = build_dblp_url(dblp_base_url, strip_dblp_base_path(parsed.path, dblp_base_url))
         if parsed.query:
             rewritten = f"{rewritten}?{parsed.query}"
         if parsed.fragment:
             rewritten = f"{rewritten}#{parsed.fragment}"
         return rewritten
-    return build_dblp_url(dblp_base_url, text)
+    return build_dblp_url(dblp_base_url, strip_dblp_base_path(text, dblp_base_url))
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -586,7 +607,18 @@ def compute_llm_signature(record: Dict[str, Any], config: Dict[str, Any]) -> str
     )
 
 
-def sanitize_record_for_cache(record: Dict[str, Any]) -> Dict[str, Any]:
+def rewrite_record_dblp_urls(record: Dict[str, Any], dblp_base_url: str) -> Dict[str, Any]:
+    if not dblp_base_url:
+        return record
+    for key in ("dblp_url", "paper_url", "venue_url"):
+        value = clean_text(record.get(key))
+        if not value or not is_dblp_url(value, dblp_base_url):
+            continue
+        record[key] = rewrite_dblp_url(value, dblp_base_url)
+    return record
+
+
+def sanitize_record_for_cache(record: Dict[str, Any], dblp_base_url: str = "") -> Dict[str, Any]:
     clean: Dict[str, Any] = {}
     for key, value in record.items():
         if key.startswith("_"):
@@ -595,13 +627,14 @@ def sanitize_record_for_cache(record: Dict[str, Any]) -> Dict[str, Any]:
             clean[key] = str(value)
         else:
             clean[key] = value
+    rewrite_record_dblp_urls(clean, dblp_base_url)
     clean["normalized_title"] = normalize_title(clean.get("title", ""))
     clean["doi"] = normalize_doi(clean.get("doi"))
     clean["dedupe_key"] = compute_primary_dedupe_key(clean)
     return clean
 
 
-def load_cache(cache_path: str) -> Dict[str, Dict[str, Any]]:
+def load_cache(cache_path: str, dblp_base_url: str = "") -> Dict[str, Dict[str, Any]]:
     path = Path(cache_path).expanduser().resolve()
     if not path.exists():
         return {}
@@ -618,7 +651,7 @@ def load_cache(cache_path: str) -> Dict[str, Dict[str, Any]]:
                 continue
             if not isinstance(record, dict):
                 continue
-            normalized = sanitize_record_for_cache(record)
+            normalized = sanitize_record_for_cache(record, dblp_base_url)
             for key in make_record_keys(normalized):
                 index[key] = normalized
     return index
@@ -639,10 +672,11 @@ def append_cache_record(
     cache_path: str,
     cache_index: Dict[str, Dict[str, Any]],
     enabled: bool,
+    dblp_base_url: str = "",
 ) -> None:
     if not enabled:
         return
-    normalized = sanitize_record_for_cache(record)
+    normalized = sanitize_record_for_cache(record, dblp_base_url)
     if not normalized.get("dedupe_key"):
         return
 
@@ -657,7 +691,10 @@ def make_publ_query_cache_key(venue_name: str, stream_query: str, year: int) -> 
     return make_fingerprint(normalize_title(venue_name), clean_text(stream_query), str(year))
 
 
-def sanitize_publ_query_cache_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def sanitize_publ_query_cache_entry(
+    entry: Dict[str, Any],
+    dblp_base_url: str = "",
+) -> Optional[Dict[str, Any]]:
     venue_name = clean_text(entry.get("venue_name"))
     stream_query = clean_text(entry.get("stream_query"))
     year = safe_int(entry.get("year"))
@@ -665,7 +702,7 @@ def sanitize_publ_query_cache_entry(entry: Dict[str, Any]) -> Optional[Dict[str,
         return None
 
     records = [
-        sanitize_record_for_cache(record)
+        sanitize_record_for_cache(record, dblp_base_url)
         for record in to_list(entry.get("records"))
         if isinstance(record, dict)
     ]
@@ -679,7 +716,7 @@ def sanitize_publ_query_cache_entry(entry: Dict[str, Any]) -> Optional[Dict[str,
     }
 
 
-def load_publ_query_cache(cache_path: str) -> Dict[str, Dict[str, Any]]:
+def load_publ_query_cache(cache_path: str, dblp_base_url: str = "") -> Dict[str, Dict[str, Any]]:
     path = Path(cache_path).expanduser().resolve()
     if not path.exists():
         return {}
@@ -702,7 +739,7 @@ def load_publ_query_cache(cache_path: str) -> Dict[str, Dict[str, Any]]:
     for raw_entry in entries:
         if not isinstance(raw_entry, dict):
             continue
-        normalized = sanitize_publ_query_cache_entry(raw_entry)
+        normalized = sanitize_publ_query_cache_entry(raw_entry, dblp_base_url)
         if not normalized:
             continue
         key = make_publ_query_cache_key(
@@ -743,10 +780,11 @@ def save_publ_query_cache_entry(
     cache_path: str,
     cache_index: Dict[str, Dict[str, Any]],
     enabled: bool,
+    dblp_base_url: str = "",
 ) -> None:
     if not enabled:
         return
-    normalized = sanitize_publ_query_cache_entry(entry)
+    normalized = sanitize_publ_query_cache_entry(entry, dblp_base_url)
     if not normalized:
         return
     key = make_publ_query_cache_key(
@@ -806,14 +844,35 @@ def is_dblp_host(value: str, configured_base_url: str = "") -> bool:
     return host in known_hosts or host.endswith(".dblp.org") or host.startswith("dblp.")
 
 
+def is_dblp_url(value: str, configured_base_url: str = "") -> bool:
+    text = clean_text(value)
+    if not text:
+        return False
+
+    parsed = urlparse(text if "://" in text else f"https://example.invalid/{text.lstrip('/')}")
+    host = normalize_hostname(parsed.netloc)
+    if is_dblp_host(host):
+        return True
+
+    configured_host = normalize_hostname(configured_base_url)
+    if not configured_host or host != configured_host:
+        return False
+
+    base_path = get_dblp_base_path(configured_base_url)
+    if not base_path:
+        return True
+    current_path = parsed.path or "/"
+    return current_path == base_path or current_path.startswith(f"{base_path}/")
+
+
 def is_doi_url(url: str) -> bool:
     host = normalize_hostname(url)
     return host == "doi.org" or host.endswith(".doi.org")
 
 
-def is_metadata_url(url: str) -> bool:
+def is_metadata_url(url: str, dblp_base_url: str = "") -> bool:
     host = normalize_hostname(url)
-    if is_dblp_host(host):
+    if is_dblp_url(url, dblp_base_url):
         return True
     metadata_hosts = {
         "wikidata.org",
@@ -939,7 +998,7 @@ def resolve_override_stream_query(
 
     parsed = urlparse(value)
     if parsed.scheme in {"http", "https"}:
-        if is_dblp_host(parsed.netloc, dblp_base_url):
+        if is_dblp_url(value, dblp_base_url):
             value = rewrite_dblp_url(value, dblp_base_url)
             parsed = urlparse(value)
             if parsed.path.startswith("/search"):
@@ -1067,7 +1126,7 @@ def parse_paper_from_search_hit(
 
     ee_value = info.get("ee")
     ee_list = [clean_text(item) for item in to_list(ee_value) if clean_text(item)]
-    paper_url = choose_paper_url(ee_list, normalize_doi(info.get("doi")))
+    paper_url = choose_paper_url(ee_list, normalize_doi(info.get("doi")), dblp_base_url)
     record = {
         "title": title,
         "authors": extract_authors_from_search_info(info),
@@ -1296,6 +1355,7 @@ def fetch_papers_from_dblp(
                         publ_query_cache_path,
                         publ_query_cache_index,
                         publ_query_cache_enabled,
+                        dblp_base_url,
                     )
                     continue
 
@@ -1351,10 +1411,10 @@ def fetch_papers_from_dblp(
     return papers
 
 
-def choose_paper_url(ee_urls: List[str], doi: str) -> str:
+def choose_paper_url(ee_urls: List[str], doi: str, dblp_base_url: str = "") -> str:
     clean_urls = [clean_text(url) for url in ee_urls if clean_text(url)]
     for url in clean_urls:
-        if is_doi_url(url) or is_metadata_url(url):
+        if is_doi_url(url) or is_metadata_url(url, dblp_base_url):
             continue
         if urlparse(url).scheme in {"http", "https"}:
             return url
@@ -1368,6 +1428,7 @@ def choose_paper_url(ee_urls: List[str], doi: str) -> str:
 
 def fetch_paper_detail(
     dblp_url: str,
+    dblp_base_url: str,
     session: requests.Session,
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
@@ -1425,7 +1486,7 @@ def fetch_paper_detail(
         for ee_tag in record_tag.find_all("ee")
         if clean_text(ee_tag.get_text(" ", strip=True))
     ]
-    paper_url = choose_paper_url(ee_urls, doi)
+    paper_url = choose_paper_url(ee_urls, doi, dblp_base_url)
 
     return {
         "title": title or NA,
@@ -2577,7 +2638,7 @@ def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
     return True
 
 
-def should_refresh_detail(record: Dict[str, Any]) -> bool:
+def should_refresh_detail(record: Dict[str, Any], dblp_base_url: str = "") -> bool:
     status = clean_text(record.get("detail_status")).lower()
     if status != "success":
         return True
@@ -2586,7 +2647,7 @@ def should_refresh_detail(record: Dict[str, Any]) -> bool:
     paper_url = clean_text(record.get("paper_url"))
     if paper_url in {"", NA}:
         return False
-    if is_metadata_url(paper_url):
+    if is_metadata_url(paper_url, dblp_base_url):
         return True
     return False
 
@@ -2805,11 +2866,13 @@ def main() -> int:
     session = build_requests_session()
     cache_enabled = bool(config["cache"]["enabled"])
     cache_path = config["cache"]["path"]
-    cache_index = load_cache(cache_path) if cache_enabled else {}
+    cache_index = load_cache(cache_path, config["dblp"]["base_url"]) if cache_enabled else {}
     publ_query_cache_enabled = bool(config["cache"]["publ_query_enabled"])
     publ_query_cache_path = config["cache"]["publ_query_path"]
     publ_query_cache_index = (
-        load_publ_query_cache(publ_query_cache_path) if publ_query_cache_enabled else {}
+        load_publ_query_cache(publ_query_cache_path, config["dblp"]["base_url"])
+        if publ_query_cache_enabled
+        else {}
     )
     publ_query_current_year_ttl_hours = float(
         config["cache"]["publ_query_current_year_ttl_hours"]
@@ -2881,7 +2944,13 @@ def main() -> int:
                 record.get("year", NA),
                 record.get("title", NA),
             )
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
             if record["matched"]:
                 matched_candidates.append(record)
 
@@ -2898,7 +2967,7 @@ def main() -> int:
         record = merge_record(candidate, cached)
         current_title = record.get("title", NA)
 
-        need_detail = should_refresh_detail(record)
+        need_detail = should_refresh_detail(record, config["dblp"]["base_url"])
         if record.get("completed") and record.get("skip_export") and not need_detail:
             logger.info("Skipping cached non-exportable record: %s", current_title)
             continue
@@ -2918,9 +2987,21 @@ def main() -> int:
         logger.info("Processing paper: %s", current_title)
 
         if need_detail:
-            detail = fetch_paper_detail(record.get("dblp_url", ""), session, config["request"], logger)
+            detail = fetch_paper_detail(
+                record.get("dblp_url", ""),
+                config["dblp"]["base_url"],
+                session,
+                config["request"],
+                logger,
+            )
             record = merge_record(detail, record)
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
 
         logger.info(
             "Identifiers | doi=%s | paper_url=%s | dblp_url=%s",
@@ -2937,13 +3018,25 @@ def main() -> int:
             )
             record["skip_export"] = True
             record["completed"] = True
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
             continue
 
         if should_refresh_abstract(record):
             abstract_info = fetch_abstract(record, session, config["request"], logger)
             record = merge_record(abstract_info, record)
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
         logger.info(
             "Abstract status=%s source=%s title=%s",
             record.get("abstract_status", NA),
@@ -2954,7 +3047,13 @@ def main() -> int:
         if should_refresh_affiliations(record):
             affiliation_info = fetch_affiliations(record, session, config["request"], logger)
             record = merge_record(affiliation_info, record)
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
         logger.info(
             "Affiliation status=%s source=%s mode=%s title=%s",
             record.get("affiliation_status", NA),
@@ -2982,16 +3081,34 @@ def main() -> int:
                     "llm_status": "no_llm",
                 }
             )
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
         elif should_refresh_llm(record, args.no_llm, config):
             llm_info = summarize_and_classify(record, config, client, logger)
             record = merge_record(llm_info, record)
-            append_cache_record(record, cache_path, cache_index, cache_enabled)
+            append_cache_record(
+                record,
+                cache_path,
+                cache_index,
+                cache_enabled,
+                config["dblp"]["base_url"],
+            )
         logger.info("LLM status=%s title=%s", record.get("llm_status", NA), current_title)
 
         record["completed"] = True
         record["skip_export"] = False
-        append_cache_record(record, cache_path, cache_index, cache_enabled)
+        append_cache_record(
+            record,
+            cache_path,
+            cache_index,
+            cache_enabled,
+            config["dblp"]["base_url"],
+        )
 
         processed_records.append(record)
         exportable_count += 1
