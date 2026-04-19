@@ -159,6 +159,7 @@ request:
     dblp.org:
       sleep_seconds: 2
       sleep_jitter_range: [0.5, 1.5]
+      max_retries: 3
     api.semanticscholar.org:
       sleep_seconds: 6
       sleep_jitter_range: [1.0, 3.0]
