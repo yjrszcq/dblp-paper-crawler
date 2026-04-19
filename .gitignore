@@ -1,0 +1,36 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment and secrets
+.env
+.env.*
+*.local
+config.yaml
+
+# Generated crawler outputs
+outputs/
+cache/
+papers.csv
+*.log
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.python-version
+
+# Editor / OS files
+.DS_Store
+.idea/
+.vscode/
