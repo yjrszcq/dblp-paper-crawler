@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import html
 import json
 import logging
@@ -407,7 +408,10 @@ def normalize_doi(doi: Optional[str]) -> str:
     value = clean_text(doi).strip()
     value = value.replace("https://doi.org/", "").replace("http://doi.org/", "")
     value = value.replace("doi:", "")
-    return value.strip().lower()
+    value = value.strip().lower()
+    if value in {"", "n/a", "na", "none", "null", "pending"}:
+        return ""
+    return value
 
 
 def safe_int(value: Any) -> Optional[int]:
@@ -438,6 +442,14 @@ def first_non_empty(*values: Any) -> str:
     return NA
 
 
+def make_fingerprint(*parts: Any) -> str:
+    hasher = hashlib.sha1()
+    for part in parts:
+        hasher.update(clean_text(part).encode("utf-8"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
 def compute_primary_dedupe_key(record: Dict[str, Any]) -> str:
     doi = normalize_doi(record.get("doi"))
     if doi:
@@ -463,6 +475,37 @@ def make_record_keys(record: Dict[str, Any]) -> List[str]:
     if normalized_title:
         keys.append(f"title:{normalized_title}")
     return keys
+
+
+def compute_record_identity(record: Dict[str, Any]) -> str:
+    return compute_primary_dedupe_key(record)
+
+
+def compute_abstract_signature(record: Dict[str, Any]) -> str:
+    return make_fingerprint(
+        compute_record_identity(record),
+        record.get("title"),
+        record.get("paper_url"),
+    )
+
+
+def compute_affiliation_signature(record: Dict[str, Any]) -> str:
+    return make_fingerprint(
+        compute_record_identity(record),
+        *to_list(record.get("authors")),
+    )
+
+
+def compute_llm_signature(record: Dict[str, Any], config: Dict[str, Any]) -> str:
+    return make_fingerprint(
+        compute_record_identity(record),
+        record.get("title"),
+        record.get("abstract"),
+        config["llm_output"]["summary_language"],
+        str(bool(config["llm_output"]["title_translation_enabled"])),
+        json.dumps(config["classification"]["categories"], ensure_ascii=False),
+        str(bool(config["classification"]["allow_new_category"])),
+    )
 
 
 def sanitize_record_for_cache(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -549,7 +592,7 @@ def is_fuzzy_match(text: str, keyword: str) -> bool:
     ratio_score = fuzz.ratio(normalized_keyword, normalized_text)
 
     if token_count >= 2:
-        return partial_score >= 90 or token_score >= 90
+        return token_score >= 95
     if keyword_length <= 4:
         return partial_score >= 96 or ratio_score >= 94
     if keyword_length <= 8:
@@ -1252,6 +1295,7 @@ def fetch_abstract(
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
 ) -> Dict[str, str]:
+    abstract_signature = compute_abstract_signature(paper)
     doi = normalize_doi(paper.get("doi"))
     title = clean_text(paper.get("title"))
     paper_url = clean_text(paper.get("paper_url"))
@@ -1260,6 +1304,7 @@ def fetch_abstract(
             "abstract": NA,
             "abstract_source": NA,
             "abstract_status": "missing_identifier",
+            "abstract_signature": abstract_signature,
         }
 
     try:
@@ -1269,6 +1314,7 @@ def fetch_abstract(
                 "abstract": clean_crossref_abstract(crossref_doi["abstract"]),
                 "abstract_source": "Crossref",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         openalex_doi = get_openalex_by_doi(paper, session, request_cfg, logger)
@@ -1278,6 +1324,7 @@ def fetch_abstract(
                 "abstract": openalex_abstract,
                 "abstract_source": "OpenAlex",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         semantic_doi = get_semantic_scholar_by_doi(paper, session, request_cfg, logger)
@@ -1287,6 +1334,7 @@ def fetch_abstract(
                 "abstract": semantic_abstract,
                 "abstract_source": "Semantic Scholar",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         arxiv_abstract = fetch_arxiv_abstract(paper, session, request_cfg, logger)
@@ -1295,6 +1343,7 @@ def fetch_abstract(
                 "abstract": arxiv_abstract,
                 "abstract_source": "arXiv",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         crossref_title = search_crossref_by_title(paper, session, request_cfg, logger)
@@ -1303,6 +1352,7 @@ def fetch_abstract(
                 "abstract": clean_crossref_abstract(crossref_title["abstract"]),
                 "abstract_source": "Crossref",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         openalex_title = search_openalex_by_title(paper, session, request_cfg, logger)
@@ -1312,6 +1362,7 @@ def fetch_abstract(
                 "abstract": openalex_title_abstract,
                 "abstract_source": "OpenAlex",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         semantic_title = search_semantic_scholar_by_title(paper, session, request_cfg, logger)
@@ -1321,18 +1372,21 @@ def fetch_abstract(
                 "abstract": semantic_title_abstract,
                 "abstract_source": "Semantic Scholar",
                 "abstract_status": "success",
+                "abstract_signature": abstract_signature,
             }
 
         return {
             "abstract": NA,
             "abstract_source": NA,
             "abstract_status": "not_found",
+            "abstract_signature": abstract_signature,
         }
     except requests.RequestException:
         return {
             "abstract": NA,
             "abstract_source": NA,
             "abstract_status": "request_failed",
+            "abstract_signature": abstract_signature,
         }
     except Exception:
         logger.exception("Unexpected error while fetching abstract for %s", title)
@@ -1340,6 +1394,7 @@ def fetch_abstract(
             "abstract": NA,
             "abstract_source": NA,
             "abstract_status": "parse_failed",
+            "abstract_signature": abstract_signature,
         }
 
 
@@ -1517,6 +1572,7 @@ def fetch_affiliations(
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
 ) -> Dict[str, Any]:
+    affiliation_signature = compute_affiliation_signature(paper)
     authors = paper.get("authors") or []
     if not authors:
         return {
@@ -1525,6 +1581,7 @@ def fetch_affiliations(
             "affiliation_source": NA,
             "affiliation_mode": NA,
             "affiliation_status": "not_found",
+            "affiliation_signature": affiliation_signature,
         }
 
     try:
@@ -1537,6 +1594,7 @@ def fetch_affiliations(
                 "affiliation_source": "Crossref",
                 "affiliation_mode": crossref_data["mode"],
                 "affiliation_status": "success",
+                "affiliation_signature": affiliation_signature,
             }
 
         crossref_title = search_crossref_by_title(paper, session, request_cfg, logger)
@@ -1548,6 +1606,7 @@ def fetch_affiliations(
                 "affiliation_source": "Crossref",
                 "affiliation_mode": crossref_title_data["mode"],
                 "affiliation_status": "success",
+                "affiliation_signature": affiliation_signature,
             }
 
         openalex_doi = get_openalex_by_doi(paper, session, request_cfg, logger)
@@ -1559,6 +1618,7 @@ def fetch_affiliations(
                 "affiliation_source": "OpenAlex",
                 "affiliation_mode": openalex_data["mode"],
                 "affiliation_status": "success",
+                "affiliation_signature": affiliation_signature,
             }
 
         openalex_title = search_openalex_by_title(paper, session, request_cfg, logger)
@@ -1570,6 +1630,7 @@ def fetch_affiliations(
                 "affiliation_source": "OpenAlex",
                 "affiliation_mode": openalex_title_data["mode"],
                 "affiliation_status": "success",
+                "affiliation_signature": affiliation_signature,
             }
 
         semantic_doi = get_semantic_scholar_by_doi(paper, session, request_cfg, logger)
@@ -1581,6 +1642,7 @@ def fetch_affiliations(
                 "affiliation_source": "Semantic Scholar",
                 "affiliation_mode": semantic_data["mode"],
                 "affiliation_status": "success",
+                "affiliation_signature": affiliation_signature,
             }
 
         semantic_title = search_semantic_scholar_by_title(paper, session, request_cfg, logger)
@@ -1592,6 +1654,7 @@ def fetch_affiliations(
                 "affiliation_source": "Semantic Scholar",
                 "affiliation_mode": semantic_title_data["mode"],
                 "affiliation_status": "success",
+                "affiliation_signature": affiliation_signature,
             }
 
         return {
@@ -1600,6 +1663,7 @@ def fetch_affiliations(
             "affiliation_source": NA,
             "affiliation_mode": NA,
             "affiliation_status": "not_found",
+            "affiliation_signature": affiliation_signature,
         }
     except requests.RequestException:
         return {
@@ -1608,6 +1672,7 @@ def fetch_affiliations(
             "affiliation_source": NA,
             "affiliation_mode": NA,
             "affiliation_status": "request_failed",
+            "affiliation_signature": affiliation_signature,
         }
     except Exception:
         logger.exception("Unexpected error while fetching affiliations for %s", paper.get("title"))
@@ -1617,6 +1682,7 @@ def fetch_affiliations(
             "affiliation_source": NA,
             "affiliation_mode": NA,
             "affiliation_status": "parse_failed",
+            "affiliation_signature": affiliation_signature,
         }
 
 
@@ -1663,7 +1729,11 @@ def get_export_link(record: Dict[str, Any]) -> str:
     )
 
 
-def build_llm_default_result(config: Dict[str, Any], llm_status: str) -> Dict[str, str]:
+def build_llm_default_result(
+    paper: Dict[str, Any],
+    config: Dict[str, Any],
+    llm_status: str,
+) -> Dict[str, str]:
     title_translation_enabled = bool(config["llm_output"]["title_translation_enabled"])
     summary_language = config["llm_output"]["summary_language"]
     return {
@@ -1675,6 +1745,7 @@ def build_llm_default_result(config: Dict[str, Any], llm_status: str) -> Dict[st
         "category": NA,
         "ai_suggested_category": NA,
         "reason": NA,
+        "llm_signature": compute_llm_signature(paper, config),
         "llm_status": llm_status,
     }
 
@@ -1692,18 +1763,19 @@ def summarize_and_classify(
     has_abstract = bool(abstract and abstract != NA)
 
     if not title and not has_abstract:
-        return build_llm_default_result(config, "missing_input")
+        return build_llm_default_result(paper, config, "missing_input")
 
     if not has_abstract and not title_translation_enabled:
-        return build_llm_default_result(config, "no_abstract")
+        return build_llm_default_result(paper, config, "no_abstract")
 
     if client is None:
-        return build_llm_default_result(config, "llm_unavailable")
+        return build_llm_default_result(paper, config, "llm_unavailable")
 
     categories = config["classification"]["categories"]
     allow_new_category = bool(config["classification"]["allow_new_category"])
     openai_cfg = config["openai"]
     summary_language_name = "中文" if summary_language == "zh" else "英文"
+    llm_signature = compute_llm_signature(paper, config)
 
     system_prompt = (
         "你是一名严谨的计算机领域论文分析助手。"
@@ -1801,6 +1873,7 @@ def summarize_and_classify(
                     "category": category,
                     "ai_suggested_category": ai_suggested_category,
                     "reason": reason,
+                    "llm_signature": llm_signature,
                     "llm_status": llm_status,
                 }
 
@@ -1828,6 +1901,7 @@ def summarize_and_classify(
                 "category": category,
                 "ai_suggested_category": ai_suggested_category,
                 "reason": reason,
+                "llm_signature": llm_signature,
                 "llm_status": "success",
             }
         except Exception as exc:
@@ -1846,7 +1920,7 @@ def summarize_and_classify(
         paper.get("title", NA),
         " | ".join(errors[-3:]) if errors else "unknown error",
     )
-    return build_llm_default_result(config, "failed")
+    return build_llm_default_result(paper, config, "failed")
 
 
 def test_ai_configuration(
@@ -1921,6 +1995,9 @@ def test_ai_configuration(
 
 
 def should_refresh_abstract(record: Dict[str, Any]) -> bool:
+    expected_signature = compute_abstract_signature(record)
+    if clean_text(record.get("abstract_signature")) != expected_signature:
+        return True
     status = clean_text(record.get("abstract_status")).lower()
     if status == "success" and clean_text(record.get("abstract")) not in {"", NA}:
         return False
@@ -1930,6 +2007,9 @@ def should_refresh_abstract(record: Dict[str, Any]) -> bool:
 
 
 def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
+    expected_signature = compute_affiliation_signature(record)
+    if clean_text(record.get("affiliation_signature")) != expected_signature:
+        return True
     status = clean_text(record.get("affiliation_status")).lower()
     if status == "success":
         return False
@@ -1939,6 +2019,9 @@ def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
 
 
 def should_refresh_llm(record: Dict[str, Any], no_llm: bool, config: Dict[str, Any]) -> bool:
+    expected_signature = compute_llm_signature(record, config)
+    if clean_text(record.get("llm_signature")) != expected_signature:
+        return True
     status = clean_text(record.get("llm_status")).lower()
     if no_llm and status == "no_llm":
         return False
@@ -2300,6 +2383,7 @@ def main() -> int:
                     "category": NA,
                     "ai_suggested_category": NA,
                     "reason": NA,
+                    "llm_signature": compute_llm_signature(record, config),
                     "llm_status": "no_llm",
                 }
             )
