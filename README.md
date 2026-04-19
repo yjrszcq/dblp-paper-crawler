@@ -104,15 +104,16 @@ request:
 - `cache.path`：JSONL 缓存路径，用于断点续爬。
 - `request`：外部请求的节流、超时、重试参数。
 
-`dblp` 配置也支持下面这些写法：
+`dblp` 配置也支持混合写法，例如：
 
 ```yaml
 dblp:
   venues:
     ICML:
       enabled: true
-      stream_query: "streamid:conf/icml:"
+      url: "https://dblp.org/db/conf/icml/index.html"
     NeurIPS:
+      enabled: true
       stream_query: "streamid:conf/nips:"
 ```
 
