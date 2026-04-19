@@ -96,7 +96,7 @@ request:
 - `classification.categories`：候选研究方向标签。
 - `classification.allow_new_category`：当候选标签都不合适时，是否允许 AI 在 `ai_suggested_category` 中建议一个新类别。
 - `openai`：OpenAI 兼容接口参数，必须从配置文件读取，不会硬编码在代码里。
-- `llm_output.title_translation_enabled`：是否生成标题中文翻译；关闭后不会翻译，也不会导出 `标题翻译` 这一列。
+- `llm_output.title_translation_enabled`：是否生成标题中文翻译；关闭后不会翻译，导出的 `标题翻译` 列会写为 `N/A`。
 - `llm_output.summary_language`：摘要总结语言，支持 `zh` 或 `en`。
 - `output.csv_dir`：导出目录。程序会按每个会议/期刊各生成一个 CSV，并统一写到这个目录下。
 - `cache.path`：JSONL 缓存路径，用于断点续爬。
@@ -241,18 +241,15 @@ AND
 
 1. `序号`：导出顺序编号。
 2. `标题`：论文标题。
-3. `标题翻译`：仅当 `llm_output.title_translation_enabled: true` 时导出；否则不会出现这一列。
-4. `作者`：作者列表，使用英文分号 `;` 分隔。
-5. `作者单位`：作者单位列表，使用英文分号 `;` 分隔。
-6. `年份`：论文年份。
-7. `期刊/会议`：期刊或会议名称。
-8. `类别`：模型从候选类别中选择的类别；未调用模型或失败时为 `N/A`。
-9. `AI建议新类别`：仅当 `category=其他` 且允许提出新类别时才可能有值，否则为 `N/A`。
-10. `摘要总结`：模型基于摘要生成的总结；语言由 `llm_output.summary_language` 决定。
-
-当 `llm_output.title_translation_enabled: false` 时，导出列顺序会自动变为：
-
-`序号, 标题, 作者, 作者单位, 年份, 期刊/会议, 类别, AI建议新类别, 摘要总结`
+3. `标题翻译`：论文标题中文翻译；若 `llm_output.title_translation_enabled: false`，则为 `N/A`。
+4. `链接`：论文主页链接，优先使用论文外部主页，其次回退到 DOI 链接，再回退到 DBLP 链接。
+5. `作者`：作者列表，使用英文分号 `;` 分隔。
+6. `作者单位`：作者单位列表，使用英文分号 `;` 分隔。
+7. `年份`：论文年份。
+8. `期刊/会议`：期刊或会议名称。
+9. `类别`：模型从候选类别中选择的类别；未调用模型或失败时为 `N/A`。
+10. `AI建议新类别`：仅当 `category=其他` 且允许提出新类别时才可能有值，否则为 `N/A`。
+11. `摘要总结`：模型基于摘要生成的总结；语言由 `llm_output.summary_language` 决定。
 
 虽然 CSV 只输出这些列，但缓存 JSONL 中会保留更多中间字段，例如：
 

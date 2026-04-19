@@ -1654,6 +1654,15 @@ def get_summary_text(record: Dict[str, Any]) -> str:
     return NA
 
 
+def get_export_link(record: Dict[str, Any]) -> str:
+    doi = normalize_doi(record.get("doi"))
+    return first_non_empty(
+        record.get("paper_url"),
+        f"https://doi.org/{doi}" if doi else "",
+        record.get("dblp_url"),
+    )
+
+
 def build_llm_default_result(config: Dict[str, Any], llm_status: str) -> Dict[str, str]:
     title_translation_enabled = bool(config["llm_output"]["title_translation_enabled"])
     summary_language = config["llm_output"]["summary_language"]
@@ -1984,7 +1993,6 @@ def sanitize_filename(value: str) -> str:
 
 
 def build_csv_rows(records: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    include_title_translation = bool(config["llm_output"]["title_translation_enabled"])
     deduped: Dict[str, Dict[str, Any]] = {}
     for record in records:
         if record.get("skip_export"):
@@ -2009,6 +2017,8 @@ def build_csv_rows(records: List[Dict[str, Any]], config: Dict[str, Any]) -> Lis
         row = {
             "序号": idx,
             "标题": clean_text(record.get("title")) or NA,
+            "标题翻译": clean_text(record.get("title_translation")) or NA,
+            "链接": get_export_link(record),
             "作者": "; ".join(clean_text(author) for author in authors if clean_text(author)) or NA,
             "作者单位": "; ".join(
                 clean_text(affiliation)
@@ -2022,8 +2032,6 @@ def build_csv_rows(records: List[Dict[str, Any]], config: Dict[str, Any]) -> Lis
             "AI建议新类别": clean_text(record.get("ai_suggested_category")) or NA,
             "摘要总结": get_summary_text(record),
         }
-        if include_title_translation:
-            row["标题翻译"] = clean_text(record.get("title_translation")) or NA
         rows.append(row)
     return rows
 
@@ -2039,12 +2047,19 @@ def export_csv(records: List[Dict[str, Any]], csv_dir: str, config: Dict[str, An
         source_venue = first_non_empty(record.get("source_venue"), record.get("venue"))
         grouped_records.setdefault(source_venue, []).append(record)
 
-    fieldnames = ["序号", "标题"]
-    if bool(config["llm_output"]["title_translation_enabled"]):
-        fieldnames.append("标题翻译")
-    fieldnames.extend(
-        ["作者", "作者单位", "年份", "期刊/会议", "类别", "AI建议新类别", "摘要总结"]
-    )
+    fieldnames = [
+        "序号",
+        "标题",
+        "标题翻译",
+        "链接",
+        "作者",
+        "作者单位",
+        "年份",
+        "期刊/会议",
+        "类别",
+        "AI建议新类别",
+        "摘要总结",
+    ]
 
     total_rows = 0
     for source_venue, venue_records in sorted(grouped_records.items(), key=lambda item: clean_text(item[0])):
