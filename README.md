@@ -33,33 +33,35 @@ pip install -r requirements.txt
 ```yaml
 dblp:
   venues:
-    ICML:
+    TPAMI:
+      enabled: false
+      url: "https://dblp.org/db/journals/pami/index.html"
+    AAAI:
       enabled: true
-      url: "https://dblp.org/db/conf/icml/index.html"
+      url: "https://dblp.org/db/conf/aaai/index.html"
     NeurIPS:
       enabled: true
       url: "https://dblp.org/db/conf/nips/index.html"
-    ICLR:
-      enabled: true
-      url: "https://dblp.org/db/conf/iclr/index.html"
   year_start: 2020
   year_end: 2025
 
 match_rules:
-  - ["privacy", "private", "differential privacy"]
-  - ["reinforcement learning", "RLHF", "alignment"]
+  - [
+      "agent",
+      "agents",
+      "agentic"
+    ]
+  - [
+      "safety",
+      "privacy",
+      "private"
+    ]
 
 classification:
   categories:
-    - "大语言模型安全"
-    - "隐私保护"
-    - "强化学习对齐"
     - "智能体安全"
-    - "数据泄露攻击"
-    - "提示注入与越狱"
-    - "模型隐私攻击"
-    - "差分隐私"
-    - "联邦学习安全"
+    - "智能体隐私保护"
+    - "智能体攻击与对抗"
     - "其他"
   allow_new_category: true
 
@@ -68,7 +70,7 @@ openai:
   api_key: "YOUR_API_KEY"
   model: "gpt-4o-mini"
   temperature: 0.2
-  max_tokens: 800
+  max_tokens: 500
   max_retries: 3
 
 llm_output:
