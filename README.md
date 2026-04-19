@@ -92,7 +92,7 @@ request:
 
 - `dblp.venues`：推荐使用融合后的 `map` 风格配置。键是会议/期刊名，值可以是 `true/false`，也可以是对象，例如 `enabled: true`、`url: ...`、`stream_query: ...`。
 - `dblp.year_start` / `dblp.year_end`：抓取年份范围，闭区间。
-- `match_rules`：标题关键词匹配规则。
+- `match_rules`：标题关键词匹配规则。可以配置多个规则组，每个 `[]` 内可以写多个关键词。
 - `classification.categories`：候选研究方向标签。
 - `classification.allow_new_category`：当候选标签都不合适时，是否允许 AI 在 `ai_suggested_category` 中建议一个新类别。
 - `openai`：OpenAI 兼容接口参数，必须从配置文件读取，不会硬编码在代码里。
@@ -183,7 +183,12 @@ python3 dblp_paper_crawler.py --resume-only --limit 20
 
 ## 4. 关键词匹配规则说明
 
-`match_rules` 是一个二维数组，规则为“组内 OR、组间 AND”。
+`match_rules` 是一个由多个规则组组成的列表。
+
+每个 `[]` 就是一组关键词：
+
+- 同一个 `[]` 里的多个关键词：组内 `OR`
+- 多个 `[]` 之间：组间 `AND`
 
 例如：
 
@@ -200,6 +205,11 @@ match_rules:
 AND
 (title contains "c" OR title contains "d")
 ```
+
+也就是说：
+
+- 你可以只写一个 `[]`，表示只要命中这一组里的任意一个关键词即可。
+- 你也可以写多个 `[]`，表示标题必须同时满足多组条件。
 
 实现细节：
 
