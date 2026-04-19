@@ -35,13 +35,13 @@ dblp:
   venues:
     TPAMI:
       enabled: false
-      url: "https://dblp.org/db/journals/pami/index.html"
+      stream_query: "streamid:journals/pami:"
     AAAI:
       enabled: true
-      url: "https://dblp.org/db/conf/aaai/index.html"
+      stream_query: "streamid:conf/aaai:"
     NeurIPS:
       enabled: true
-      url: "https://dblp.org/db/conf/nips/index.html"
+      stream_query: "streamid:conf/nips:"
   year_start: 2020
   year_end: 2025
 
@@ -92,7 +92,7 @@ request:
 
 说明：
 
-- `dblp.venues`：推荐使用融合后的 `map` 风格配置。键是会议/期刊名，值可以是 `true/false`，也可以是对象，例如 `enabled: true`、`url: ...`、`stream_query: ...`。
+- `dblp.venues`：推荐使用融合后的 `map` 风格配置。键是会议/期刊名，值可以是 `true/false`，也可以是对象，例如 `enabled: true`、`stream_query: ...`。`url: ...` 仍兼容，但更推荐直接写 `stream_query`，更稳定，也能减少一次 HTML 解析请求。
 - `dblp.year_start` / `dblp.year_end`：抓取年份范围，闭区间。
 - `match_rules`：标题关键词匹配规则。可以配置多个规则组，每个 `[]` 内可以写多个关键词。
 - `classification.categories`：候选研究方向标签。
@@ -111,7 +111,7 @@ dblp:
   venues:
     ICML:
       enabled: true
-      url: "https://dblp.org/db/conf/icml/index.html"
+      stream_query: "streamid:conf/icml:"
     NeurIPS:
       stream_query: "streamid:conf/nips:"
 ```
@@ -124,7 +124,7 @@ dblp:
     - "ICML"
     - "NeurIPS"
   venue_stream_overrides:
-    ICML: "https://dblp.org/db/conf/icml/index.html"
+    ICML: "streamid:conf/icml:"
 ```
 
 ## 3. 运行程序

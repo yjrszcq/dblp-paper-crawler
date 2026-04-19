@@ -7,13 +7,13 @@ dblp:
   venues:
     TPAMI:
       enabled: false
-      url: "https://dblp.org/db/journals/pami/index.html"
+      stream_query: "streamid:journals/pami:"
     AAAI:
       enabled: true
-      url: "https://dblp.org/db/conf/aaai/index.html"
+      stream_query: "streamid:conf/aaai:"
     NeurIPS:
       enabled: true
-      url: "https://dblp.org/db/conf/nips/index.html"
+      stream_query: "streamid:conf/nips:"
   year_start: 2020
   year_end: 2025
 
