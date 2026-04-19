@@ -17,6 +17,8 @@ ENV/
 .env.*
 *.local
 config.yaml
+.bak
+.bak/
 
 # Generated crawler outputs
 outputs/
