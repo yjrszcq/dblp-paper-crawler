@@ -575,6 +575,33 @@ def append_cache_record(
         cache_index[key] = normalized
 
 
+def normalize_hostname(url: str) -> str:
+    parsed = urlparse(clean_text(url))
+    host = parsed.netloc.lower().strip()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def is_doi_url(url: str) -> bool:
+    host = normalize_hostname(url)
+    return host == "doi.org" or host.endswith(".doi.org")
+
+
+def is_metadata_url(url: str) -> bool:
+    host = normalize_hostname(url)
+    metadata_hosts = {
+        "dblp.org",
+        "dblp.uni-trier.de",
+        "wikidata.org",
+        "openalex.org",
+        "crossref.org",
+        "semanticscholar.org",
+        "api.openalex.org",
+    }
+    return any(host == candidate or host.endswith(f".{candidate}") for candidate in metadata_hosts)
+
+
 def is_fuzzy_match(text: str, keyword: str) -> bool:
     normalized_text = normalize_title(text)
     normalized_keyword = normalize_title(keyword)
@@ -904,15 +931,15 @@ def fetch_papers_from_dblp(
 def choose_paper_url(ee_urls: List[str], doi: str) -> str:
     clean_urls = [clean_text(url) for url in ee_urls if clean_text(url)]
     for url in clean_urls:
-        if "dblp.org" in url:
+        if is_doi_url(url) or is_metadata_url(url):
             continue
-        if "doi.org" not in url:
-            return url
-    for url in clean_urls:
-        if "dblp.org" not in url:
+        if urlparse(url).scheme in {"http", "https"}:
             return url
     if doi:
         return f"https://doi.org/{doi}"
+    for url in clean_urls:
+        if is_doi_url(url):
+            return url
     return NA
 
 
@@ -2023,8 +2050,8 @@ def should_refresh_llm(record: Dict[str, Any], no_llm: bool, config: Dict[str, A
     if clean_text(record.get("llm_signature")) != expected_signature:
         return True
     status = clean_text(record.get("llm_status")).lower()
-    if no_llm and status == "no_llm":
-        return False
+    if no_llm:
+        return status != "no_llm"
     title_translation_enabled = bool(config["llm_output"]["title_translation_enabled"])
     target_summary_language = config["llm_output"]["summary_language"]
     has_abstract = clean_text(record.get("abstract")) not in {"", NA}
@@ -2300,7 +2327,6 @@ def main() -> int:
 
         need_detail = (
             clean_text(record.get("detail_status")).lower() != "success"
-            or not normalize_doi(record.get("doi"))
             or clean_text(record.get("paper_url")) in {"", NA}
             or not record.get("authors")
         )
@@ -2313,7 +2339,7 @@ def main() -> int:
             and not need_detail
             and not should_refresh_abstract(record)
             and not should_refresh_affiliations(record)
-            and (args.no_llm or not should_refresh_llm(record, args.no_llm, config))
+            and not should_refresh_llm(record, args.no_llm, config)
         ):
             processed_records.append(record)
             exportable_count += 1
