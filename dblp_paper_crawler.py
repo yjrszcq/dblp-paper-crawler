@@ -480,6 +480,27 @@ def request_json(
         return None
 
 
+def request_json_with_status(
+    session: requests.Session,
+    url: str,
+    request_cfg: Dict[str, Any],
+    logger: logging.Logger,
+    **kwargs: Any,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    response = request_with_retries(session, "GET", url, request_cfg, logger, **kwargs)
+    if response is None:
+        return None, "request_failed"
+    if response.status_code >= 400:
+        if response.status_code == 404:
+            return None, "not_found"
+        return None, "request_failed"
+    try:
+        return response.json(), "success"
+    except ValueError:
+        logger.warning("Failed to parse JSON response from %s", url)
+        return None, "parse_failed"
+
+
 def clean_text(value: Any) -> str:
     if value is None:
         return ""
@@ -1701,9 +1722,10 @@ def get_crossref_by_doi(
     doi = normalize_doi(paper.get("doi"))
     if not doi:
         source_cache["crossref_doi"] = None
+        source_cache["crossref_doi_status"] = "missing_identifier"
         return None
 
-    payload = request_json(
+    payload, status = request_json_with_status(
         session,
         f"{CROSSREF_WORKS_API}/{quote(doi, safe='')}",
         request_cfg,
@@ -1711,6 +1733,7 @@ def get_crossref_by_doi(
     )
     message = payload.get("message") if payload else None
     source_cache["crossref_doi"] = message
+    source_cache["crossref_doi_status"] = status
     return message
 
 
@@ -1727,9 +1750,10 @@ def search_crossref_by_title(
     title = clean_text(paper.get("title"))
     if not title:
         source_cache["crossref_title"] = None
+        source_cache["crossref_title_status"] = "missing_identifier"
         return None
 
-    payload = request_json(
+    payload, status = request_json_with_status(
         session,
         CROSSREF_WORKS_API,
         request_cfg,
@@ -1749,6 +1773,7 @@ def search_crossref_by_title(
         min_score=78,
     )
     source_cache["crossref_title"] = best_item
+    source_cache["crossref_title_status"] = status
     return best_item
 
 
@@ -1777,9 +1802,10 @@ def get_openalex_by_doi(
     doi = normalize_doi(paper.get("doi"))
     if not doi:
         source_cache["openalex_doi"] = None
+        source_cache["openalex_doi_status"] = "missing_identifier"
         return None
 
-    payload = request_json(
+    payload, status = request_json_with_status(
         session,
         OPENALEX_WORKS_API,
         request_cfg,
@@ -1791,6 +1817,7 @@ def get_openalex_by_doi(
     )
     results = payload.get("results", []) if payload else []
     source_cache["openalex_doi"] = results[0] if results else None
+    source_cache["openalex_doi_status"] = status
     return source_cache["openalex_doi"]
 
 
@@ -1807,9 +1834,10 @@ def search_openalex_by_title(
     title = clean_text(paper.get("title"))
     if not title:
         source_cache["openalex_title"] = None
+        source_cache["openalex_title_status"] = "missing_identifier"
         return None
 
-    payload = request_json(
+    payload, status = request_json_with_status(
         session,
         OPENALEX_WORKS_API,
         request_cfg,
@@ -1819,6 +1847,7 @@ def search_openalex_by_title(
     results = payload.get("results", []) if payload else []
     best_item = select_best_title_candidate(results, paper, min_score=80)
     source_cache["openalex_title"] = best_item
+    source_cache["openalex_title_status"] = status
     return best_item
 
 
@@ -1847,9 +1876,10 @@ def get_semantic_scholar_by_doi(
     doi = normalize_doi(paper.get("doi"))
     if not doi:
         source_cache["semantic_doi"] = None
+        source_cache["semantic_doi_status"] = "missing_identifier"
         return None
 
-    payload = request_json(
+    payload, status = request_json_with_status(
         session,
         f"{SEMANTIC_SCHOLAR_PAPER_API}/DOI:{quote(doi, safe='')}",
         request_cfg,
@@ -1857,6 +1887,7 @@ def get_semantic_scholar_by_doi(
         params={"fields": "title,abstract,authors.name,authors.affiliations,venue,year,url,externalIds"},
     )
     source_cache["semantic_doi"] = payload
+    source_cache["semantic_doi_status"] = status
     return payload
 
 
@@ -1873,9 +1904,10 @@ def search_semantic_scholar_by_title(
     title = clean_text(paper.get("title"))
     if not title:
         source_cache["semantic_title"] = None
+        source_cache["semantic_title_status"] = "missing_identifier"
         return None
 
-    payload = request_json(
+    payload, status = request_json_with_status(
         session,
         SEMANTIC_SCHOLAR_SEARCH_API,
         request_cfg,
@@ -1889,6 +1921,7 @@ def search_semantic_scholar_by_title(
     data = payload.get("data", []) if payload else []
     best_item = select_best_title_candidate(data, paper, min_score=80)
     source_cache["semantic_title"] = best_item
+    source_cache["semantic_title_status"] = status
     return best_item
 
 
@@ -1923,6 +1956,7 @@ def fetch_arxiv_abstract(
     arxiv_id = extract_arxiv_id(paper)
     if not arxiv_id:
         source_cache["arxiv_abstract"] = None
+        source_cache["arxiv_abstract_status"] = "missing_identifier"
         return None
 
     response = request_with_retries(
@@ -1935,6 +1969,7 @@ def fetch_arxiv_abstract(
     )
     if response is None or response.status_code >= 400:
         source_cache["arxiv_abstract"] = None
+        source_cache["arxiv_abstract_status"] = "request_failed"
         return None
 
     try:
@@ -1942,10 +1977,26 @@ def fetch_arxiv_abstract(
         summary = soup.find("summary")
         abstract = clean_text(summary.get_text(" ", strip=True) if summary else "")
         source_cache["arxiv_abstract"] = abstract or None
+        source_cache["arxiv_abstract_status"] = "success"
         return source_cache["arxiv_abstract"]
     except Exception:
         source_cache["arxiv_abstract"] = None
+        source_cache["arxiv_abstract_status"] = "parse_failed"
         return None
+
+
+def resolve_source_failure_status(paper: Dict[str, Any], status_keys: List[str]) -> str:
+    source_cache = paper.get("_source_cache", {}) or {}
+    statuses = [
+        clean_text(source_cache.get(key)).lower()
+        for key in status_keys
+        if clean_text(source_cache.get(key))
+    ]
+    if any(status == "request_failed" for status in statuses):
+        return "request_failed"
+    if any(status == "parse_failed" for status in statuses):
+        return "parse_failed"
+    return "not_found"
 
 
 def fetch_abstract(
@@ -2034,10 +2085,22 @@ def fetch_abstract(
                 "abstract_signature": abstract_signature,
             }
 
+        abstract_status = resolve_source_failure_status(
+            paper,
+            [
+                "crossref_doi_status",
+                "openalex_doi_status",
+                "semantic_doi_status",
+                "arxiv_abstract_status",
+                "crossref_title_status",
+                "openalex_title_status",
+                "semantic_title_status",
+            ],
+        )
         return {
             "abstract": NA,
             "abstract_source": NA,
-            "abstract_status": "not_found",
+            "abstract_status": abstract_status,
             "abstract_signature": abstract_signature,
         }
     except requests.RequestException:
@@ -2316,12 +2379,23 @@ def fetch_affiliations(
                 "affiliation_signature": affiliation_signature,
             }
 
+        affiliation_status = resolve_source_failure_status(
+            paper,
+            [
+                "crossref_doi_status",
+                "crossref_title_status",
+                "openalex_doi_status",
+                "openalex_title_status",
+                "semantic_doi_status",
+                "semantic_title_status",
+            ],
+        )
         return {
             "authors": authors,
             "affiliations": [NA],
             "affiliation_source": NA,
             "affiliation_mode": NA,
-            "affiliation_status": "not_found",
+            "affiliation_status": affiliation_status,
             "affiliation_signature": affiliation_signature,
         }
     except requests.RequestException:
@@ -2823,6 +2897,11 @@ def export_csv(records: List[Dict[str, Any]], csv_dir: str, config: Dict[str, An
         "AI建议新类别",
         "摘要总结",
     ]
+
+    for venue_name in config["dblp"]["venues"]:
+        stale_path = output_dir / f"{sanitize_filename(venue_name)}.csv"
+        if stale_path.exists():
+            stale_path.unlink()
 
     total_rows = 0
     for source_venue, venue_records in sorted(grouped_records.items(), key=lambda item: clean_text(item[0])):

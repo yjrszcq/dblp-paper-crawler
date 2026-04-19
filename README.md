@@ -268,6 +268,8 @@ AND
 
 这些文件都会统一输出到 `output.csv_dir` 指定的目录中。
 
+每次直接运行脚本时，目标 CSV 都会按本轮结果重新生成，不会在旧 CSV 基础上做“补写”。
+
 每个 CSV 的表头顺序如下：
 
 1. `序号`：导出顺序编号。
@@ -309,6 +311,7 @@ AND
 - 默认直接运行脚本时，会先读取 `cache.path` 和 `cache.publ_query_path`。
 - 如果某个 `venue/year` 的 DBLP 抓取缓存已经完整，就直接复用；不完整则只补抓缺失部分。
 - 单篇论文层面的 `detail / abstract / affiliation / llm` 结果也会优先复用；如果某一步还是 `pending`、`request_failed`、签名失效或配置变了，程序会自动补跑。
+- `not_found` 只表示在本轮所有候选数据源都正常返回、但仍未找到目标字段；像代理失败、429、503、解析失败这类情况会保留为失败状态，后续运行还会继续补。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
