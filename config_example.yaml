@@ -1,0 +1,58 @@
+# Example configuration for dblp_paper_crawler.py
+# Usage:
+#   python3 dblp_paper_crawler.py --config config_example.yaml --test-ai
+#   python3 dblp_paper_crawler.py --config config_example.yaml --no-llm --limit 20
+
+dblp:
+  venues:
+    TPAMI:
+      enabled: false
+      url: "https://dblp.org/db/journals/pami/index.html"
+    AAAI:
+      enabled: true
+      url: "https://dblp.org/db/conf/aaai/index.html"
+    NeurIPS:
+      enabled: true
+      url: "https://dblp.org/db/conf/nips/index.html"
+  year_start: 2020
+  year_end: 2025
+
+match_rules:
+  - [
+      "agent",
+      "agents",
+      "agentic"
+    ]
+  - [
+      "safety",
+      "privacy",
+      "private"
+    ]
+
+classification:
+  categories:
+    - "智能体安全"
+    - "智能体隐私保护"
+    - "智能体攻击与对抗"
+    - "其他"
+  allow_new_category: true
+
+openai:
+  host: "https://api.openai.com/v1"
+  api_key: "YOUR_API_KEY"
+  model: "gpt-4o-mini"
+  temperature: 0.2
+  max_tokens: 500
+  max_retries: 3
+
+output:
+  csv_dir: "./outputs"
+
+cache:
+  enabled: true
+  path: "./cache/papers_cache.jsonl"
+
+request:
+  sleep_seconds: 1
+  timeout_seconds: 20
+  max_retries: 3
