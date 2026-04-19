@@ -118,10 +118,16 @@ cache:
   # 全部 venue/year 跑完一轮后，针对未完成项的额外补抓轮数上限
   publ_query_max_refetch_rounds: 2
 
+  # 对已经判定为 not_found 的摘要/单位结果，过多少小时后允许重新探测；0 表示不自动重试
+  not_found_ttl_hours: 72
+
 # 通用请求配置
 request:
   # 自定义 User-Agent；程序发出的普通 HTTP 请求都会使用它
   user_agent: "dblp-paper-crawler/1.0 (https://dblp.org/; academic metadata enrichment; contact: local-user)"
+
+  # 是否继承系统环境里的 HTTP(S)_PROXY / ALL_PROXY 等代理配置
+  trust_env: true
 
   # 普通外部请求之间的基础休眠时间，单位秒；过低更容易触发限流
   sleep_seconds: 1
@@ -134,3 +140,27 @@ request:
 
   # 普通外部请求的最大重试次数
   max_retries: 3
+
+  # 如果服务端返回 Retry-After，是否优先按它要求的时间等待
+  retry_after_enabled: true
+
+  # 某个 host 返回 429 后，默认额外冷却多久，单位秒
+  host_cooldown_seconds: 60
+
+  # 是否启用各个外部补充数据源
+  source_enabled:
+    crossref: true
+    openalex: true
+    semantic_scholar: true
+    arxiv: true
+
+  # 按 host 细调等待时间、重试次数和冷却时间
+  host_rate_limits:
+    dblp.org:
+      sleep_seconds: 2
+      sleep_jitter_range: [0.5, 1.5]
+    api.semanticscholar.org:
+      sleep_seconds: 6
+      sleep_jitter_range: [1.0, 3.0]
+      max_retries: 2
+      cooldown_seconds: 120

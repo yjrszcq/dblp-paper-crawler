@@ -88,13 +88,31 @@ cache:
   publ_query_path: "./cache/dblp_publ_cache.json"
   publ_query_current_year_ttl_hours: 24
   publ_query_max_refetch_rounds: 2
+  not_found_ttl_hours: 72
 
 request:
   user_agent: "dblp-paper-crawler/1.0 (https://dblp.org/; academic metadata enrichment; contact: local-user)"
+  trust_env: true
   sleep_seconds: 1
   sleep_jitter_range: [0.0, 0.5]
   timeout_seconds: 20
   max_retries: 3
+  retry_after_enabled: true
+  host_cooldown_seconds: 60
+  source_enabled:
+    crossref: true
+    openalex: true
+    semantic_scholar: true
+    arxiv: true
+  host_rate_limits:
+    dblp.org:
+      sleep_seconds: 2
+      sleep_jitter_range: [0.5, 1.5]
+    api.semanticscholar.org:
+      sleep_seconds: 6
+      sleep_jitter_range: [1.0, 3.0]
+      max_retries: 2
+      cooldown_seconds: 120
 ```
 
 说明：
@@ -114,10 +132,16 @@ request:
 - `cache.publ_query_path`：DBLP 年度抓取缓存文件路径。只有某个 `venue/year` 完整抓取成功后才会写入，避免把半截结果缓存下来。
 - `cache.publ_query_current_year_ttl_hours`：当前年份的 DBLP 年度缓存有效期，单位小时；历史年份默认长期复用。设为 `0` 或负数时，当前年份也不主动刷新。
 - `cache.publ_query_max_refetch_rounds`：在所有会议/期刊的所有年份完整扫过一轮后，针对仍未完成的 `venue/year` 再重爬的最大轮数。`0` 表示只跑首轮，不做补抓。
+- `cache.not_found_ttl_hours`：对已经写成 `not_found` 的摘要/作者单位结果，过多少小时后允许重新探测。设为 `0` 或负数时，不自动重试。
 - `request.user_agent`：普通外部请求统一使用的 User-Agent，可手动自定义。
+- `request.trust_env`：是否继承系统环境中的代理设置，例如 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。
 - `request.sleep_seconds`：每次请求之间的基础等待时间。
 - `request.sleep_jitter_range`：附加在 `sleep_seconds` 之上的随机噪声范围，格式是 `[最小值, 最大值]`，单位秒；如果需要，最小值可以写成负数。
 - `request.timeout_seconds` / `request.max_retries`：普通外部请求的超时和最大重试次数。
+- `request.retry_after_enabled`：如果服务端返回 `Retry-After`，是否优先按它要求的等待时间退避。
+- `request.host_cooldown_seconds`：某个 host 返回 `429` 后，默认额外冷却多久再继续请求。
+- `request.source_enabled`：控制是否启用 `Crossref`、`OpenAlex`、`Semantic Scholar`、`arXiv` 这些补充数据源。
+- `request.host_rate_limits`：对特定 host 单独设置 `sleep_seconds`、`sleep_jitter_range`、`timeout_seconds`、`max_retries`、`cooldown_seconds`。
 
 `dblp` 配置也支持混合写法，例如：
 
@@ -323,6 +347,7 @@ AND
 - 如果某个 `venue/year` 的 DBLP 抓取缓存已经完整，就直接复用；不完整则只补抓缺失部分。
 - 单篇论文层面的 `detail / abstract / affiliation / llm` 结果也会优先复用；如果某一步还是 `pending`、`request_failed`、签名失效或配置变了，程序会自动补跑。
 - `not_found` 只表示在本轮所有候选数据源都正常返回、但仍未找到目标字段；像代理失败、429、503、解析失败这类情况会保留为失败状态，后续运行还会继续补。
+- 如果配置了 `cache.not_found_ttl_hours > 0`，则旧的 `not_found` 结果在过期后也会自动重新探测。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
 - `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后继续本次运行。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。

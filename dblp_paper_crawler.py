@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import html
 import json
@@ -375,9 +377,11 @@ def load_config(config_path: str) -> Dict[str, Any]:
         0,
         int(cache_cfg.get("publ_query_max_refetch_rounds", 2)),
     )
+    cache_cfg["not_found_ttl_hours"] = float(cache_cfg.get("not_found_ttl_hours", 72))
 
     request_cfg = config["request"]
     request_cfg["user_agent"] = clean_text(request_cfg.get("user_agent")) or USER_AGENT
+    request_cfg["trust_env"] = bool(request_cfg.get("trust_env", True))
     request_cfg["sleep_seconds"] = float(request_cfg.get("sleep_seconds", 1))
     jitter_min, jitter_max = normalize_sleep_jitter_range(
         request_cfg.get("sleep_jitter_range", [0.0, 0.25])
@@ -387,6 +391,18 @@ def load_config(config_path: str) -> Dict[str, Any]:
     request_cfg["sleep_jitter_max_seconds"] = jitter_max
     request_cfg["timeout_seconds"] = float(request_cfg.get("timeout_seconds", 20))
     request_cfg["max_retries"] = int(request_cfg.get("max_retries", 3))
+    request_cfg["retry_after_enabled"] = bool(request_cfg.get("retry_after_enabled", True))
+    request_cfg["host_cooldown_seconds"] = max(
+        0.0,
+        float(request_cfg.get("host_cooldown_seconds", 60)),
+    )
+    request_cfg["source_enabled"] = normalize_source_enabled_config(
+        request_cfg.get("source_enabled", {})
+    )
+    request_cfg["host_rate_limits"] = normalize_host_rate_limits_config(
+        request_cfg.get("host_rate_limits", {})
+    )
+    request_cfg.setdefault("_host_block_until", {})
 
     return config
 
@@ -396,6 +412,33 @@ def resolve_path(base_dir: Path, value: str) -> Path:
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def normalize_source_enabled_config(raw: Any) -> Dict[str, bool]:
+    defaults = {
+        "crossref": True,
+        "openalex": True,
+        "semantic_scholar": True,
+        "arxiv": True,
+    }
+    aliases = {
+        "crossref": "crossref",
+        "openalex": "openalex",
+        "semantic_scholar": "semantic_scholar",
+        "semantic-scholar": "semantic_scholar",
+        "semantic scholar": "semantic_scholar",
+        "semanticscholar": "semantic_scholar",
+        "arxiv": "arxiv",
+    }
+    normalized = dict(defaults)
+    if not isinstance(raw, dict):
+        return normalized
+    for raw_key, raw_value in raw.items():
+        key = aliases.get(clean_text(raw_key).lower())
+        if not key:
+            continue
+        normalized[key] = bool(raw_value)
+    return normalized
 
 
 def normalize_sleep_jitter_range(value: Any) -> tuple[float, float]:
@@ -417,6 +460,68 @@ def normalize_sleep_jitter_range(value: Any) -> tuple[float, float]:
         lower = 0.0 if upper >= 0 else upper
 
     return (lower, upper) if lower <= upper else (upper, lower)
+
+
+def normalize_host_rate_limits_config(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw_host, raw_cfg in raw.items():
+        host = normalize_hostname(raw_host)
+        if not host or not isinstance(raw_cfg, dict):
+            continue
+
+        entry: Dict[str, Any] = {}
+        if "sleep_seconds" in raw_cfg:
+            entry["sleep_seconds"] = float(raw_cfg.get("sleep_seconds", 0))
+        if "sleep_jitter_range" in raw_cfg:
+            jitter_min, jitter_max = normalize_sleep_jitter_range(raw_cfg.get("sleep_jitter_range"))
+            entry["sleep_jitter_range"] = [jitter_min, jitter_max]
+            entry["sleep_jitter_min_seconds"] = jitter_min
+            entry["sleep_jitter_max_seconds"] = jitter_max
+        if "timeout_seconds" in raw_cfg:
+            entry["timeout_seconds"] = float(raw_cfg.get("timeout_seconds", 20))
+        if "max_retries" in raw_cfg:
+            entry["max_retries"] = int(raw_cfg.get("max_retries", 3))
+        if "retry_after_enabled" in raw_cfg:
+            entry["retry_after_enabled"] = bool(raw_cfg.get("retry_after_enabled"))
+        if "cooldown_seconds" in raw_cfg:
+            entry["cooldown_seconds"] = max(0.0, float(raw_cfg.get("cooldown_seconds", 0)))
+        normalized[host] = entry
+
+    return normalized
+
+
+def get_request_profile(request_cfg: Dict[str, Any], url: str = "") -> Dict[str, Any]:
+    profile = {
+        "host": normalize_hostname(url),
+        "sleep_seconds": float(request_cfg.get("sleep_seconds", 0)),
+        "sleep_jitter_min_seconds": float(request_cfg.get("sleep_jitter_min_seconds", 0.0)),
+        "sleep_jitter_max_seconds": float(request_cfg.get("sleep_jitter_max_seconds", 0.25)),
+        "timeout_seconds": float(request_cfg.get("timeout_seconds", 20)),
+        "max_retries": int(request_cfg.get("max_retries", 3)),
+        "retry_after_enabled": bool(request_cfg.get("retry_after_enabled", True)),
+        "cooldown_seconds": max(0.0, float(request_cfg.get("host_cooldown_seconds", 0.0))),
+    }
+    host = profile["host"]
+    override = (request_cfg.get("host_rate_limits", {}) or {}).get(host, {}) if host else {}
+    if override:
+        if "sleep_seconds" in override:
+            profile["sleep_seconds"] = float(override["sleep_seconds"])
+        if "sleep_jitter_min_seconds" in override:
+            profile["sleep_jitter_min_seconds"] = float(override["sleep_jitter_min_seconds"])
+        if "sleep_jitter_max_seconds" in override:
+            profile["sleep_jitter_max_seconds"] = float(override["sleep_jitter_max_seconds"])
+        if "timeout_seconds" in override:
+            profile["timeout_seconds"] = float(override["timeout_seconds"])
+        if "max_retries" in override:
+            profile["max_retries"] = int(override["max_retries"])
+        if "retry_after_enabled" in override:
+            profile["retry_after_enabled"] = bool(override["retry_after_enabled"])
+        if "cooldown_seconds" in override:
+            profile["cooldown_seconds"] = max(0.0, float(override["cooldown_seconds"]))
+    return profile
 
 
 def random_choice_weighted(options: List[tuple[str, int]]) -> str:
@@ -651,6 +756,7 @@ def persist_request_user_agent_to_config(config_path: str, user_agent: str) -> P
 
 def build_requests_session(request_cfg: Dict[str, Any]) -> requests.Session:
     session = requests.Session()
+    session.trust_env = bool(request_cfg.get("trust_env", True))
     session.headers.update(
         {
             "User-Agent": request_cfg["user_agent"],
@@ -675,14 +781,85 @@ def ensure_parent_directory(path_str: str) -> None:
     Path(path_str).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
-def pause_request(request_cfg: Dict[str, Any], attempt: int = 0) -> None:
-    base_sleep = max(0.0, float(request_cfg.get("sleep_seconds", 0)))
-    jitter_min = float(request_cfg.get("sleep_jitter_min_seconds", 0.0))
-    jitter_max = float(request_cfg.get("sleep_jitter_max_seconds", 0.25))
+def pause_request(
+    request_cfg: Dict[str, Any],
+    attempt: int = 0,
+    url: str = "",
+    minimum_delay: float = 0.0,
+) -> None:
+    profile = get_request_profile(request_cfg, url)
+    base_sleep = max(0.0, float(profile.get("sleep_seconds", 0)))
+    jitter_min = float(profile.get("sleep_jitter_min_seconds", 0.0))
+    jitter_max = float(profile.get("sleep_jitter_max_seconds", 0.25))
     jitter = random.uniform(jitter_min, jitter_max)
-    delay = max(0.0, base_sleep + min(attempt, 3) * 0.5 + jitter)
+    delay = max(
+        minimum_delay,
+        base_sleep + min(attempt, 3) * 0.5 + jitter,
+    )
+    delay = max(0.0, delay)
     if delay > 0:
         time.sleep(delay)
+
+
+def parse_retry_after_seconds(value: Any) -> Optional[float]:
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+
+
+def get_host_block_until(request_cfg: Dict[str, Any], host: str) -> float:
+    if not host:
+        return 0.0
+    return safe_float((request_cfg.get("_host_block_until", {}) or {}).get(host)) or 0.0
+
+
+def set_host_block_until(request_cfg: Dict[str, Any], host: str, block_until: float) -> None:
+    if not host:
+        return
+    state = request_cfg.setdefault("_host_block_until", {})
+    if not isinstance(state, dict):
+        state = {}
+        request_cfg["_host_block_until"] = state
+    state[host] = max(0.0, block_until)
+
+
+def clear_host_block_until(request_cfg: Dict[str, Any], host: str) -> None:
+    if not host:
+        return
+    state = request_cfg.get("_host_block_until", {}) or {}
+    if isinstance(state, dict):
+        state.pop(host, None)
+
+
+def wait_for_host_cooldown(
+    request_cfg: Dict[str, Any],
+    url: str,
+    logger: logging.Logger,
+) -> None:
+    host = normalize_hostname(url)
+    if not host:
+        return
+    remaining = get_host_block_until(request_cfg, host) - time.time()
+    if remaining <= 0:
+        return
+    logger.info(
+        "Waiting %.1fs for host cooldown before requesting %s",
+        remaining,
+        host,
+    )
+    time.sleep(remaining)
 
 
 def request_with_retries(
@@ -693,20 +870,43 @@ def request_with_retries(
     logger: logging.Logger,
     **kwargs: Any,
 ) -> Optional[requests.Response]:
-    timeout = kwargs.pop("timeout", request_cfg.get("timeout_seconds", 20))
-    max_retries = int(request_cfg.get("max_retries", 3))
+    profile = get_request_profile(request_cfg, url)
+    timeout = kwargs.pop("timeout", profile.get("timeout_seconds", 20))
+    max_retries = int(profile.get("max_retries", 3))
     retriable_codes = {408, 409, 425, 429, 500, 502, 503, 504}
+    host = clean_text(profile.get("host"))
     response: Optional[requests.Response] = None
 
     for attempt in range(max_retries + 1):
+        retry_after_seconds = 0.0
+        wait_for_host_cooldown(request_cfg, url, logger)
         try:
             response = session.request(method=method, url=url, timeout=timeout, **kwargs)
             if response.status_code < 400:
-                pause_request(request_cfg, attempt)
+                clear_host_block_until(request_cfg, host)
+                pause_request(request_cfg, attempt, url=url)
                 return response
+
+            retry_after_seconds = (
+                parse_retry_after_seconds(response.headers.get("Retry-After"))
+                if bool(profile.get("retry_after_enabled", True))
+                else None
+            )
+            cooldown_seconds = max(
+                float(profile.get("cooldown_seconds", 0.0)),
+                retry_after_seconds or 0.0,
+            )
+            if response.status_code == 429 and cooldown_seconds > 0:
+                set_host_block_until(request_cfg, host, time.time() + cooldown_seconds)
+
             if response.status_code not in retriable_codes or attempt >= max_retries:
                 logger.warning("Request failed: %s %s -> HTTP %s", method, url, response.status_code)
-                pause_request(request_cfg, attempt)
+                pause_request(
+                    request_cfg,
+                    attempt,
+                    url=url,
+                    minimum_delay=retry_after_seconds or 0.0,
+                )
                 return response
             logger.warning(
                 "Transient HTTP error for %s %s -> %s, retry %s/%s",
@@ -726,9 +926,14 @@ def request_with_retries(
                 exc,
             )
             if attempt >= max_retries:
-                pause_request(request_cfg, attempt)
+                pause_request(request_cfg, attempt, url=url)
                 return None
-        pause_request(request_cfg, attempt)
+        pause_request(
+            request_cfg,
+            attempt,
+            url=url,
+            minimum_delay=retry_after_seconds or 0.0,
+        )
     return response
 
 
@@ -2268,6 +2473,32 @@ def resolve_source_failure_status(paper: Dict[str, Any], status_keys: List[str])
     return "not_found"
 
 
+def is_source_enabled(request_cfg: Dict[str, Any], source_name: str) -> bool:
+    source_enabled = request_cfg.get("source_enabled", {}) or {}
+    return bool(source_enabled.get(source_name, True))
+
+
+def update_stage_checked_at(
+    record: Dict[str, Any],
+    stage_name: str,
+    checked_at: Optional[float] = None,
+) -> None:
+    record[f"{stage_name}_checked_at"] = time.time() if checked_at is None else float(checked_at)
+
+
+def should_refresh_not_found_status(
+    record: Dict[str, Any],
+    checked_at_field: str,
+    ttl_hours: float,
+) -> bool:
+    if ttl_hours <= 0:
+        return False
+    checked_at = safe_float(record.get(checked_at_field))
+    if checked_at is None or checked_at <= 0:
+        return True
+    return (time.time() - checked_at) >= ttl_hours * 3600
+
+
 def fetch_abstract(
     paper: Dict[str, Any],
     session: requests.Session,
@@ -2287,72 +2518,79 @@ def fetch_abstract(
         }
 
     try:
-        crossref_doi = get_crossref_by_doi(paper, session, request_cfg, logger)
-        if crossref_doi and crossref_doi.get("abstract"):
-            return {
-                "abstract": clean_crossref_abstract(crossref_doi["abstract"]),
-                "abstract_source": "Crossref",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "crossref"):
+            crossref_doi = get_crossref_by_doi(paper, session, request_cfg, logger)
+            if crossref_doi and crossref_doi.get("abstract"):
+                return {
+                    "abstract": clean_crossref_abstract(crossref_doi["abstract"]),
+                    "abstract_source": "Crossref",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
-        openalex_doi = get_openalex_by_doi(paper, session, request_cfg, logger)
-        openalex_abstract = reconstruct_openalex_abstract(openalex_doi or {})
-        if openalex_abstract != NA:
-            return {
-                "abstract": openalex_abstract,
-                "abstract_source": "OpenAlex",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "openalex"):
+            openalex_doi = get_openalex_by_doi(paper, session, request_cfg, logger)
+            openalex_abstract = reconstruct_openalex_abstract(openalex_doi or {})
+            if openalex_abstract != NA:
+                return {
+                    "abstract": openalex_abstract,
+                    "abstract_source": "OpenAlex",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
-        semantic_doi = get_semantic_scholar_by_doi(paper, session, request_cfg, logger)
-        semantic_abstract = clean_text((semantic_doi or {}).get("abstract"))
-        if semantic_abstract:
-            return {
-                "abstract": semantic_abstract,
-                "abstract_source": "Semantic Scholar",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "semantic_scholar"):
+            semantic_doi = get_semantic_scholar_by_doi(paper, session, request_cfg, logger)
+            semantic_abstract = clean_text((semantic_doi or {}).get("abstract"))
+            if semantic_abstract:
+                return {
+                    "abstract": semantic_abstract,
+                    "abstract_source": "Semantic Scholar",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
-        arxiv_abstract = fetch_arxiv_abstract(paper, session, request_cfg, logger)
-        if arxiv_abstract:
-            return {
-                "abstract": arxiv_abstract,
-                "abstract_source": "arXiv",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "arxiv"):
+            arxiv_abstract = fetch_arxiv_abstract(paper, session, request_cfg, logger)
+            if arxiv_abstract:
+                return {
+                    "abstract": arxiv_abstract,
+                    "abstract_source": "arXiv",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
-        crossref_title = search_crossref_by_title(paper, session, request_cfg, logger)
-        if crossref_title and crossref_title.get("abstract"):
-            return {
-                "abstract": clean_crossref_abstract(crossref_title["abstract"]),
-                "abstract_source": "Crossref",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "crossref"):
+            crossref_title = search_crossref_by_title(paper, session, request_cfg, logger)
+            if crossref_title and crossref_title.get("abstract"):
+                return {
+                    "abstract": clean_crossref_abstract(crossref_title["abstract"]),
+                    "abstract_source": "Crossref",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
-        openalex_title = search_openalex_by_title(paper, session, request_cfg, logger)
-        openalex_title_abstract = reconstruct_openalex_abstract(openalex_title or {})
-        if openalex_title_abstract != NA:
-            return {
-                "abstract": openalex_title_abstract,
-                "abstract_source": "OpenAlex",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "openalex"):
+            openalex_title = search_openalex_by_title(paper, session, request_cfg, logger)
+            openalex_title_abstract = reconstruct_openalex_abstract(openalex_title or {})
+            if openalex_title_abstract != NA:
+                return {
+                    "abstract": openalex_title_abstract,
+                    "abstract_source": "OpenAlex",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
-        semantic_title = search_semantic_scholar_by_title(paper, session, request_cfg, logger)
-        semantic_title_abstract = clean_text((semantic_title or {}).get("abstract"))
-        if semantic_title_abstract:
-            return {
-                "abstract": semantic_title_abstract,
-                "abstract_source": "Semantic Scholar",
-                "abstract_status": "success",
-                "abstract_signature": abstract_signature,
-            }
+        if is_source_enabled(request_cfg, "semantic_scholar"):
+            semantic_title = search_semantic_scholar_by_title(paper, session, request_cfg, logger)
+            semantic_title_abstract = clean_text((semantic_title or {}).get("abstract"))
+            if semantic_title_abstract:
+                return {
+                    "abstract": semantic_title_abstract,
+                    "abstract_source": "Semantic Scholar",
+                    "abstract_status": "success",
+                    "abstract_signature": abstract_signature,
+                }
 
         abstract_status = resolve_source_failure_status(
             paper,
@@ -2576,77 +2814,80 @@ def fetch_affiliations(
         }
 
     try:
-        crossref_doi = get_crossref_by_doi(paper, session, request_cfg, logger)
-        crossref_data = parse_crossref_affiliations(crossref_doi or {}, authors)
-        if crossref_data:
-            return {
-                "authors": authors,
-                "affiliations": crossref_data["affiliations"],
-                "affiliation_source": "Crossref",
-                "affiliation_mode": crossref_data["mode"],
-                "affiliation_status": "success",
-                "affiliation_signature": affiliation_signature,
-            }
+        if is_source_enabled(request_cfg, "crossref"):
+            crossref_doi = get_crossref_by_doi(paper, session, request_cfg, logger)
+            crossref_data = parse_crossref_affiliations(crossref_doi or {}, authors)
+            if crossref_data:
+                return {
+                    "authors": authors,
+                    "affiliations": crossref_data["affiliations"],
+                    "affiliation_source": "Crossref",
+                    "affiliation_mode": crossref_data["mode"],
+                    "affiliation_status": "success",
+                    "affiliation_signature": affiliation_signature,
+                }
 
-        crossref_title = search_crossref_by_title(paper, session, request_cfg, logger)
-        crossref_title_data = parse_crossref_affiliations(crossref_title or {}, authors)
-        if crossref_title_data:
-            return {
-                "authors": authors,
-                "affiliations": crossref_title_data["affiliations"],
-                "affiliation_source": "Crossref",
-                "affiliation_mode": crossref_title_data["mode"],
-                "affiliation_status": "success",
-                "affiliation_signature": affiliation_signature,
-            }
+            crossref_title = search_crossref_by_title(paper, session, request_cfg, logger)
+            crossref_title_data = parse_crossref_affiliations(crossref_title or {}, authors)
+            if crossref_title_data:
+                return {
+                    "authors": authors,
+                    "affiliations": crossref_title_data["affiliations"],
+                    "affiliation_source": "Crossref",
+                    "affiliation_mode": crossref_title_data["mode"],
+                    "affiliation_status": "success",
+                    "affiliation_signature": affiliation_signature,
+                }
 
-        openalex_doi = get_openalex_by_doi(paper, session, request_cfg, logger)
-        openalex_data = parse_openalex_affiliations(openalex_doi or {}, authors)
-        if openalex_data:
-            return {
-                "authors": authors,
-                "affiliations": openalex_data["affiliations"],
-                "affiliation_source": "OpenAlex",
-                "affiliation_mode": openalex_data["mode"],
-                "affiliation_status": "success",
-                "affiliation_signature": affiliation_signature,
-            }
+        if is_source_enabled(request_cfg, "openalex"):
+            openalex_doi = get_openalex_by_doi(paper, session, request_cfg, logger)
+            openalex_data = parse_openalex_affiliations(openalex_doi or {}, authors)
+            if openalex_data:
+                return {
+                    "authors": authors,
+                    "affiliations": openalex_data["affiliations"],
+                    "affiliation_source": "OpenAlex",
+                    "affiliation_mode": openalex_data["mode"],
+                    "affiliation_status": "success",
+                    "affiliation_signature": affiliation_signature,
+                }
 
-        openalex_title = search_openalex_by_title(paper, session, request_cfg, logger)
-        openalex_title_data = parse_openalex_affiliations(openalex_title or {}, authors)
-        if openalex_title_data:
-            return {
-                "authors": authors,
-                "affiliations": openalex_title_data["affiliations"],
-                "affiliation_source": "OpenAlex",
-                "affiliation_mode": openalex_title_data["mode"],
-                "affiliation_status": "success",
-                "affiliation_signature": affiliation_signature,
-            }
+            openalex_title = search_openalex_by_title(paper, session, request_cfg, logger)
+            openalex_title_data = parse_openalex_affiliations(openalex_title or {}, authors)
+            if openalex_title_data:
+                return {
+                    "authors": authors,
+                    "affiliations": openalex_title_data["affiliations"],
+                    "affiliation_source": "OpenAlex",
+                    "affiliation_mode": openalex_title_data["mode"],
+                    "affiliation_status": "success",
+                    "affiliation_signature": affiliation_signature,
+                }
 
-        semantic_doi = get_semantic_scholar_by_doi(paper, session, request_cfg, logger)
-        semantic_data = parse_semantic_scholar_affiliations(semantic_doi or {}, authors)
-        if semantic_data:
-            return {
-                "authors": authors,
-                "affiliations": semantic_data["affiliations"],
-                "affiliation_source": "Semantic Scholar",
-                "affiliation_mode": semantic_data["mode"],
-                "affiliation_status": "success",
-                "affiliation_signature": affiliation_signature,
-            }
+        if is_source_enabled(request_cfg, "semantic_scholar"):
+            semantic_doi = get_semantic_scholar_by_doi(paper, session, request_cfg, logger)
+            semantic_data = parse_semantic_scholar_affiliations(semantic_doi or {}, authors)
+            if semantic_data:
+                return {
+                    "authors": authors,
+                    "affiliations": semantic_data["affiliations"],
+                    "affiliation_source": "Semantic Scholar",
+                    "affiliation_mode": semantic_data["mode"],
+                    "affiliation_status": "success",
+                    "affiliation_signature": affiliation_signature,
+                }
 
-        semantic_title = search_semantic_scholar_by_title(paper, session, request_cfg, logger)
-        semantic_title_data = parse_semantic_scholar_affiliations(semantic_title or {}, authors)
-        if semantic_title_data:
-            return {
-                "authors": authors,
-                "affiliations": semantic_title_data["affiliations"],
-                "affiliation_source": "Semantic Scholar",
-                "affiliation_mode": semantic_title_data["mode"],
-                "affiliation_status": "success",
-                "affiliation_signature": affiliation_signature,
-            }
+            semantic_title = search_semantic_scholar_by_title(paper, session, request_cfg, logger)
+            semantic_title_data = parse_semantic_scholar_affiliations(semantic_title or {}, authors)
+            if semantic_title_data:
+                return {
+                    "authors": authors,
+                    "affiliations": semantic_title_data["affiliations"],
+                    "affiliation_source": "Semantic Scholar",
+                    "affiliation_mode": semantic_title_data["mode"],
+                    "affiliation_status": "success",
+                    "affiliation_signature": affiliation_signature,
+                }
 
         affiliation_status = resolve_source_failure_status(
             paper,
@@ -2996,19 +3237,25 @@ def test_ai_configuration(
     return False
 
 
-def should_refresh_abstract(record: Dict[str, Any]) -> bool:
+def should_refresh_abstract(record: Dict[str, Any], cache_cfg: Dict[str, Any]) -> bool:
     expected_signature = compute_abstract_signature(record)
     if clean_text(record.get("abstract_signature")) != expected_signature:
         return True
     status = clean_text(record.get("abstract_status")).lower()
     if status == "success" and clean_text(record.get("abstract")) not in {"", NA}:
         return False
-    if status in {"not_found", "missing_identifier"}:
+    if status == "not_found":
+        return should_refresh_not_found_status(
+            record,
+            "abstract_checked_at",
+            float(cache_cfg.get("not_found_ttl_hours", 0)),
+        )
+    if status == "missing_identifier":
         return False
     return True
 
 
-def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
+def should_refresh_affiliations(record: Dict[str, Any], cache_cfg: Dict[str, Any]) -> bool:
     expected_signature = compute_affiliation_signature(record)
     if clean_text(record.get("affiliation_signature")) != expected_signature:
         return True
@@ -3016,7 +3263,11 @@ def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
     if status == "success":
         return False
     if status == "not_found":
-        return False
+        return should_refresh_not_found_status(
+            record,
+            "affiliation_checked_at",
+            float(cache_cfg.get("not_found_ttl_hours", 0)),
+        )
     return True
 
 
@@ -3264,6 +3515,7 @@ def reset_record_from_stage(record: Dict[str, Any], restart_stage: str) -> Dict[
 
     if restart_includes_stage(restart_stage, "detail"):
         updated["detail_status"] = "pending"
+        updated["detail_checked_at"] = 0.0
         updated["completed"] = False
         updated["skip_export"] = False
 
@@ -3272,6 +3524,7 @@ def reset_record_from_stage(record: Dict[str, Any], restart_stage: str) -> Dict[
         updated["abstract_source"] = NA
         updated["abstract_status"] = "pending"
         updated["abstract_signature"] = ""
+        updated["abstract_checked_at"] = 0.0
         updated["completed"] = False
         updated["skip_export"] = False
 
@@ -3281,6 +3534,7 @@ def reset_record_from_stage(record: Dict[str, Any], restart_stage: str) -> Dict[
         updated["affiliation_mode"] = NA
         updated["affiliation_status"] = "pending"
         updated["affiliation_signature"] = ""
+        updated["affiliation_checked_at"] = 0.0
         updated["completed"] = False
         updated["skip_export"] = False
 
@@ -3295,6 +3549,7 @@ def reset_record_from_stage(record: Dict[str, Any], restart_stage: str) -> Dict[
         updated["reason"] = NA
         updated["llm_signature"] = ""
         updated["llm_status"] = "pending"
+        updated["llm_checked_at"] = 0.0
         updated["completed"] = False
         updated["skip_export"] = False
 
@@ -3468,7 +3723,7 @@ def main() -> int:
         )
 
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
@@ -3479,6 +3734,8 @@ def main() -> int:
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
+        config["cache"]["not_found_ttl_hours"],
+        config["request"]["trust_env"],
         config["request"]["user_agent"],
         config["request"]["sleep_seconds"],
         config["request"]["sleep_jitter_min_seconds"],
@@ -3559,8 +3816,8 @@ def main() -> int:
             record.get("completed")
             and not record.get("skip_export")
             and not need_detail
-            and not should_refresh_abstract(record)
-            and not should_refresh_affiliations(record)
+            and not should_refresh_abstract(record, config["cache"])
+            and not should_refresh_affiliations(record, config["cache"])
             and not should_refresh_llm(record, args.no_llm, config)
         ):
             processed_records.append(record)
@@ -3579,6 +3836,7 @@ def main() -> int:
                 logger,
             )
             record = merge_record(detail, record)
+            update_stage_checked_at(record, "detail")
             append_cache_record(
                 record,
                 cache_path,
@@ -3611,9 +3869,10 @@ def main() -> int:
             )
             continue
 
-        if should_refresh_abstract(record):
+        if should_refresh_abstract(record, config["cache"]):
             abstract_info = fetch_abstract(record, session, config["request"], logger)
             record = merge_record(abstract_info, record)
+            update_stage_checked_at(record, "abstract")
             append_cache_record(
                 record,
                 cache_path,
@@ -3628,9 +3887,10 @@ def main() -> int:
             current_title,
         )
 
-        if should_refresh_affiliations(record):
+        if should_refresh_affiliations(record, config["cache"]):
             affiliation_info = fetch_affiliations(record, session, config["request"], logger)
             record = merge_record(affiliation_info, record)
+            update_stage_checked_at(record, "affiliation")
             append_cache_record(
                 record,
                 cache_path,
@@ -3665,6 +3925,7 @@ def main() -> int:
                     "llm_status": "no_llm",
                 }
             )
+            update_stage_checked_at(record, "llm")
             append_cache_record(
                 record,
                 cache_path,
@@ -3675,6 +3936,7 @@ def main() -> int:
         elif should_refresh_llm(record, args.no_llm, config):
             llm_info = summarize_and_classify(record, config, client, logger)
             record = merge_record(llm_info, record)
+            update_stage_checked_at(record, "llm")
             append_cache_record(
                 record,
                 cache_path,
