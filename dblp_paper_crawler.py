@@ -398,6 +398,7 @@ def normalize_title(title: str) -> str:
 def normalize_person_name(name: str) -> str:
     text = clean_text(name).lower()
     text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\b\d+\b", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -1034,22 +1035,131 @@ def is_supported_paper_type(paper_type: str) -> bool:
     )
 
 
+def extract_candidate_title(item: Dict[str, Any]) -> str:
+    return first_non_empty(
+        item.get("title"),
+        item.get("display_name"),
+        item.get("name"),
+    )
+
+
+def extract_candidate_year(item: Dict[str, Any]) -> Optional[int]:
+    for key in ("year", "publication_year"):
+        year = safe_int(item.get(key))
+        if year is not None:
+            return year
+
+    for key in ("issued", "published", "published-print", "published-online", "created", "deposited"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            date_parts = value.get("date-parts", [])
+            if isinstance(date_parts, list) and date_parts and date_parts[0]:
+                year = safe_int(date_parts[0][0])
+                if year is not None:
+                    return year
+        year = safe_int(value)
+        if year is not None:
+            return year
+    return None
+
+
+def extract_candidate_authors(item: Dict[str, Any]) -> List[str]:
+    authors: List[str] = []
+    seen: set[str] = set()
+
+    def add_author(name: Any) -> None:
+        text = clean_text(name)
+        if not text:
+            return
+        normalized = normalize_person_name(text)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        authors.append(text)
+
+    for author in item.get("authors", []) or []:
+        if not isinstance(author, dict):
+            add_author(author)
+            continue
+        add_author(
+            author.get("name")
+            or author.get("display_name")
+            or ((author.get("author") or {}).get("display_name"))
+        )
+
+    for author in item.get("author", []) or []:
+        if not isinstance(author, dict):
+            add_author(author)
+            continue
+        add_author(" ".join(filter(None, [author.get("given"), author.get("family")])))
+
+    for authorship in item.get("authorships", []) or []:
+        if not isinstance(authorship, dict):
+            continue
+        add_author(((authorship.get("author") or {}).get("display_name")))
+
+    return authors
+
+
+def count_author_overlaps(paper_authors: List[str], candidate_authors: List[str]) -> int:
+    if not paper_authors or not candidate_authors:
+        return 0
+
+    normalized_candidates = [normalize_person_name(name) for name in candidate_authors]
+    overlaps = 0
+    for author in paper_authors:
+        normalized_author = normalize_person_name(author)
+        if not normalized_author:
+            continue
+        if normalized_author in normalized_candidates:
+            overlaps += 1
+            continue
+        best_score = max(
+            (fuzz.ratio(normalized_author, candidate_name) for candidate_name in normalized_candidates),
+            default=0,
+        )
+        if best_score >= 90:
+            overlaps += 1
+    return overlaps
+
+
 def select_best_title_candidate(
     candidates: Iterable[Dict[str, Any]],
-    title: str,
+    paper: Dict[str, Any],
     min_score: int = 80,
 ) -> Optional[Dict[str, Any]]:
+    title = clean_text(paper.get("title"))
+    paper_year = safe_int(paper.get("year"))
+    paper_authors = [clean_text(author) for author in paper.get("authors") or [] if clean_text(author)]
     best_item: Optional[Dict[str, Any]] = None
     best_score = min_score
     for item in candidates:
-        candidate_title = first_non_empty(
-            item.get("title"),
-            item.get("display_name"),
-            item.get("name"),
-        )
+        candidate_title = extract_candidate_title(item)
         if candidate_title == NA:
             continue
-        score = title_similarity(title, candidate_title)
+        title_score = title_similarity(title, candidate_title)
+        if title_score <= min_score:
+            continue
+
+        candidate_year = extract_candidate_year(item)
+        if (
+            paper_year is not None
+            and candidate_year is not None
+            and abs(paper_year - candidate_year) > 1
+        ):
+            continue
+
+        candidate_authors = extract_candidate_authors(item)
+        author_overlap = count_author_overlaps(paper_authors, candidate_authors)
+        if paper_authors and candidate_authors and author_overlap == 0:
+            continue
+
+        score = title_score
+        if paper_year is not None and candidate_year is not None:
+            score += 4 if paper_year == candidate_year else 1
+        if author_overlap:
+            score += min(author_overlap, 3) * 3
+
         if score > best_score:
             best_score = score
             best_item = item
@@ -1113,7 +1223,7 @@ def search_crossref_by_title(
             }
             for item in items
         ),
-        title,
+        paper,
         min_score=78,
     )
     source_cache["crossref_title"] = best_item
@@ -1185,7 +1295,7 @@ def search_openalex_by_title(
         params={"search": title, "per-page": 5},
     )
     results = payload.get("results", []) if payload else []
-    best_item = select_best_title_candidate(results, title, min_score=80)
+    best_item = select_best_title_candidate(results, paper, min_score=80)
     source_cache["openalex_title"] = best_item
     return best_item
 
@@ -1255,7 +1365,7 @@ def search_semantic_scholar_by_title(
         },
     )
     data = payload.get("data", []) if payload else []
-    best_item = select_best_title_candidate(data, title, min_score=80)
+    best_item = select_best_title_candidate(data, paper, min_score=80)
     source_cache["semantic_title"] = best_item
     return best_item
 
@@ -2045,6 +2155,20 @@ def should_refresh_affiliations(record: Dict[str, Any]) -> bool:
     return True
 
 
+def should_refresh_detail(record: Dict[str, Any]) -> bool:
+    status = clean_text(record.get("detail_status")).lower()
+    if status != "success":
+        return True
+    if not record.get("authors"):
+        return True
+    paper_url = clean_text(record.get("paper_url"))
+    if paper_url in {"", NA}:
+        return False
+    if is_metadata_url(paper_url):
+        return True
+    return False
+
+
 def should_refresh_llm(record: Dict[str, Any], no_llm: bool, config: Dict[str, Any]) -> bool:
     expected_signature = compute_llm_signature(record, config)
     if clean_text(record.get("llm_signature")) != expected_signature:
@@ -2088,7 +2212,14 @@ def is_meaningful_value(value: Any) -> bool:
 def merge_record(preferred: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(fallback)
     for key, value in preferred.items():
-        if key not in merged or is_meaningful_value(value) or isinstance(value, bool):
+        if key not in merged:
+            merged[key] = value
+            continue
+        if isinstance(value, bool):
+            if value or not isinstance(merged.get(key), bool):
+                merged[key] = value
+            continue
+        if is_meaningful_value(value):
             merged[key] = value
     return merged
 
@@ -2325,11 +2456,7 @@ def main() -> int:
         record = merge_record(candidate, cached)
         current_title = record.get("title", NA)
 
-        need_detail = (
-            clean_text(record.get("detail_status")).lower() != "success"
-            or clean_text(record.get("paper_url")) in {"", NA}
-            or not record.get("authors")
-        )
+        need_detail = should_refresh_detail(record)
         if record.get("completed") and record.get("skip_export") and not need_detail:
             logger.info("Skipping cached non-exportable record: %s", current_title)
             continue
