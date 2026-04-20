@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Generate a random browser-like User-Agent from browser/platform/version parts, "
-            "write it back to request.user_agent in the config file, and use it for this run."
+            "write it back to request.user_agent in the config file, then exit."
         ),
     )
     return parser.parse_args()
@@ -781,24 +781,39 @@ def ensure_parent_directory(path_str: str) -> None:
     Path(path_str).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
-def pause_request(
+def compute_pause_delay(
     request_cfg: Dict[str, Any],
     attempt: int = 0,
     url: str = "",
     minimum_delay: float = 0.0,
-) -> None:
+) -> float:
     profile = get_request_profile(request_cfg, url)
     base_sleep = max(0.0, float(profile.get("sleep_seconds", 0)))
     jitter_min = float(profile.get("sleep_jitter_min_seconds", 0.0))
     jitter_max = float(profile.get("sleep_jitter_max_seconds", 0.25))
     jitter = random.uniform(jitter_min, jitter_max)
-    delay = max(
+    return max(
         minimum_delay,
         base_sleep + min(attempt, 3) * 0.5 + jitter,
     )
-    delay = max(0.0, delay)
+
+
+def pause_request(
+    request_cfg: Dict[str, Any],
+    attempt: int = 0,
+    url: str = "",
+    minimum_delay: float = 0.0,
+    computed_delay: Optional[float] = None,
+) -> float:
+    delay = max(
+        0.0,
+        float(computed_delay)
+        if computed_delay is not None
+        else compute_pause_delay(request_cfg, attempt, url, minimum_delay),
+    )
     if delay > 0:
         time.sleep(delay)
+    return delay
 
 
 def parse_retry_after_seconds(value: Any) -> Optional[float]:
@@ -832,7 +847,8 @@ def set_host_block_until(request_cfg: Dict[str, Any], host: str, block_until: fl
     if not isinstance(state, dict):
         state = {}
         request_cfg["_host_block_until"] = state
-    state[host] = max(0.0, block_until)
+    current = safe_float(state.get(host)) or 0.0
+    state[host] = max(current, max(0.0, block_until))
 
 
 def clear_host_block_until(request_cfg: Dict[str, Any], host: str) -> None:
@@ -879,6 +895,7 @@ def request_with_retries(
 
     for attempt in range(max_retries + 1):
         retry_after_seconds = 0.0
+        retry_delay: Optional[float] = None
         wait_for_host_cooldown(request_cfg, url, logger)
         try:
             response = session.request(method=method, url=url, timeout=timeout, **kwargs)
@@ -892,12 +909,25 @@ def request_with_retries(
                 if bool(profile.get("retry_after_enabled", True))
                 else None
             )
-            cooldown_seconds = max(
-                float(profile.get("cooldown_seconds", 0.0)),
-                retry_after_seconds or 0.0,
+            retry_delay = compute_pause_delay(
+                request_cfg,
+                attempt,
+                url=url,
+                minimum_delay=retry_after_seconds or 0.0,
             )
-            if response.status_code == 429 and cooldown_seconds > 0:
-                set_host_block_until(request_cfg, host, time.time() + cooldown_seconds)
+            cooldown_seconds = max(0.0, float(profile.get("cooldown_seconds", 0.0)))
+            if response.status_code == 429:
+                total_wait = max(retry_after_seconds or 0.0, retry_delay + cooldown_seconds)
+                if total_wait > 0:
+                    set_host_block_until(request_cfg, host, time.time() + total_wait)
+                    logger.info(
+                        "Applied 429 cooldown for host=%s total_wait=%.1fs retry_delay=%.1fs extra_cooldown=%.1fs retry_after=%.1fs",
+                        host or normalize_hostname(url) or "N/A",
+                        total_wait,
+                        retry_delay,
+                        cooldown_seconds,
+                        retry_after_seconds or 0.0,
+                    )
 
             if response.status_code not in retriable_codes or attempt >= max_retries:
                 logger.warning("Request failed: %s %s -> HTTP %s", method, url, response.status_code)
@@ -906,6 +936,7 @@ def request_with_retries(
                     attempt,
                     url=url,
                     minimum_delay=retry_after_seconds or 0.0,
+                    computed_delay=retry_delay,
                 )
                 return response
             logger.warning(
@@ -933,6 +964,7 @@ def request_with_retries(
             attempt,
             url=url,
             minimum_delay=retry_after_seconds or 0.0,
+            computed_delay=retry_delay,
         )
     return response
 
@@ -3680,6 +3712,7 @@ def main() -> int:
             config_path,
             chosen_user_agent,
         )
+        return 0
 
     session = build_requests_session(config["request"])
     cache_enabled = bool(config["cache"]["enabled"])

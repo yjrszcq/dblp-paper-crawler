@@ -139,7 +139,7 @@ request:
 - `request.sleep_jitter_range`：附加在 `sleep_seconds` 之上的随机噪声范围，格式是 `[最小值, 最大值]`，单位秒；如果需要，最小值可以写成负数。
 - `request.timeout_seconds` / `request.max_retries`：普通外部请求的超时和最大重试次数。
 - `request.retry_after_enabled`：如果服务端返回 `Retry-After`，是否优先按它要求的等待时间退避。
-- `request.host_cooldown_seconds`：某个 host 返回 `429` 后，默认额外冷却多久再继续请求。
+- `request.host_cooldown_seconds`：某个 host 返回 `429` 后，默认额外冷却多久再继续请求；这个冷却时间会加在本次普通请求间隔之后，不会被 `sleep_seconds` / `sleep_jitter_range` 抵扣。
 - `request.source_enabled`：控制是否启用 `Crossref`、`OpenAlex`、`Semantic Scholar`、`arXiv` 这些补充数据源。
 - `request.host_rate_limits`：对特定 host 单独设置 `sleep_seconds`、`sleep_jitter_range`、`timeout_seconds`、`max_retries`、`cooldown_seconds`。
 
@@ -193,7 +193,7 @@ python3 dblp_paper_crawler.py --limit 20
 python3 dblp_paper_crawler.py --no-llm --limit 20
 ```
 
-如果你想把配置文件里的 `request.user_agent` 随机换成一个按浏览器平台、版本号和设备信息拼装出来的浏览器风格 UA，并立刻用它执行本次任务：
+如果你想把配置文件里的 `request.user_agent` 随机换成一个按浏览器平台、版本号和设备信息拼装出来的浏览器风格 UA，并在改写配置后立即退出：
 
 ```bash
 python3 dblp_paper_crawler.py --randomize-ua
@@ -349,7 +349,7 @@ AND
 - `not_found` 只表示在本轮所有候选数据源都正常返回、但仍未找到目标字段；像代理失败、429、503、解析失败这类情况会保留为失败状态，后续运行还会继续补。
 - 如果配置了 `cache.not_found_ttl_hours > 0`，则旧的 `not_found` 结果在过期后也会自动重新探测。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
-- `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后继续本次运行。
+- `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后立即退出。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
 - 去重优先级为：
