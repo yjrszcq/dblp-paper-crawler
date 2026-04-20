@@ -615,8 +615,8 @@ def build_random_chrome_user_agent(platform: str, mobile: bool = False) -> str:
     )
 
 
-def build_random_edge_user_agent() -> str:
-    platform = random_windows_platform()
+def build_random_edge_user_agent(platform: str = "") -> str:
+    platform = clean_text(platform) or random_windows_platform()
     chrome_version = random_chrome_version()
     edge_version = random_edge_version(chrome_version)
     return (
@@ -652,20 +652,66 @@ def build_random_ios_safari_user_agent() -> str:
     )
 
 
-def generate_browser_like_user_agent() -> str:
-    profile = random_choice_weighted(
-        [
-            ("windows_chrome", 28),
-            ("mac_chrome", 16),
-            ("linux_chrome", 8),
-            ("windows_edge", 16),
-            ("windows_firefox", 12),
-            ("linux_firefox", 8),
-            ("mac_safari", 8),
-            ("android_chrome", 3),
-            ("ios_safari", 1),
-        ]
-    )
+def detect_user_agent_platform_family(user_agent: str) -> str:
+    text = clean_text(user_agent).lower()
+    if not text or text == USER_AGENT.lower():
+        return ""
+    if "android" in text:
+        return "android"
+    if any(token in text for token in ("iphone", "ipad", "ipod", "cpu iphone os", "cpu os")):
+        return "ios"
+    if any(token in text for token in ("windows nt", "win64", "wow64")):
+        return "windows"
+    if "macintosh" in text or ("mac os x" in text and "iphone" not in text and "ipad" not in text):
+        return "macos"
+    if "linux" in text or "x11" in text:
+        return "linux"
+    return ""
+
+
+def get_random_browser_profile_weights(platform_family: str = "") -> List[tuple[str, int]]:
+    normalized = clean_text(platform_family).lower()
+    constrained_profiles = {
+        "windows": [
+            ("windows_chrome", 42),
+            ("windows_edge", 33),
+            ("windows_firefox", 25),
+        ],
+        "macos": [
+            ("mac_chrome", 40),
+            ("mac_safari", 38),
+            ("mac_firefox", 14),
+            ("mac_edge", 8),
+        ],
+        "linux": [
+            ("linux_chrome", 62),
+            ("linux_firefox", 38),
+        ],
+        "android": [
+            ("android_chrome", 100),
+        ],
+        "ios": [
+            ("ios_safari", 100),
+        ],
+    }
+    if normalized in constrained_profiles:
+        return constrained_profiles[normalized]
+    return [
+        ("windows_chrome", 28),
+        ("mac_chrome", 14),
+        ("linux_chrome", 8),
+        ("windows_edge", 16),
+        ("windows_firefox", 12),
+        ("linux_firefox", 8),
+        ("mac_safari", 8),
+        ("mac_firefox", 3),
+        ("mac_edge", 2),
+        ("android_chrome", 1),
+    ]
+
+
+def generate_browser_like_user_agent(platform_family: str = "") -> str:
+    profile = random_choice_weighted(get_random_browser_profile_weights(platform_family))
 
     if profile == "windows_chrome":
         return build_random_chrome_user_agent(random_windows_platform())
@@ -674,9 +720,13 @@ def generate_browser_like_user_agent() -> str:
     if profile == "linux_chrome":
         return build_random_chrome_user_agent(random_linux_platform())
     if profile == "windows_edge":
-        return build_random_edge_user_agent()
+        return build_random_edge_user_agent(random_windows_platform())
     if profile == "windows_firefox":
         return build_random_firefox_user_agent(random_windows_platform())
+    if profile == "mac_firefox":
+        return build_random_firefox_user_agent(random_macos_platform())
+    if profile == "mac_edge":
+        return build_random_edge_user_agent(random_macos_platform())
     if profile == "linux_firefox":
         return build_random_firefox_user_agent(random_linux_platform())
     if profile == "mac_safari":
@@ -688,11 +738,12 @@ def generate_browser_like_user_agent() -> str:
 
 def choose_random_user_agent(current_user_agent: str = "") -> str:
     current = clean_text(current_user_agent)
+    platform_family = detect_user_agent_platform_family(current)
     for _ in range(8):
-        candidate = generate_browser_like_user_agent()
+        candidate = generate_browser_like_user_agent(platform_family)
         if clean_text(candidate) != current:
             return candidate
-    return generate_browser_like_user_agent()
+    return generate_browser_like_user_agent(platform_family)
 
 
 def yaml_quote_string(value: str) -> str:

@@ -195,6 +195,8 @@ python3 dblp_paper_crawler.py --no-llm --limit 20
 
 如果你想把配置文件里的 `request.user_agent` 随机换成一个按浏览器平台、版本号和设备信息拼装出来的浏览器风格 UA，并在改写配置后立即退出：
 
+- 如果当前 `request.user_agent` 能识别出平台家族，随机时会尽量保持在同一类设备内，例如 Windows 不会跳成 macOS Safari，iPhone 不会跳成 Android Chrome。
+
 ```bash
 python3 dblp_paper_crawler.py --randomize-ua
 ```
