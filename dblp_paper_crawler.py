@@ -2739,10 +2739,13 @@ def prompt_manual_abstract_entry(
     print(f"Year: {year}")
     print(f"Link: {link}")
     print("Auto abstract fetch did not succeed.")
-    print("Type 'm' to paste the abstract manually, or press Enter to keep the current result.")
+    print(
+        "Type 'm' to enter multi-line manual input, paste a single-line abstract directly here, "
+        "or press Enter / type 'n' to keep the current result."
+    )
 
     try:
-        choice = input("> ").strip().lower()
+        raw_choice = input("> ").strip()
     except EOFError:
         logger.warning("EOF while waiting for manual abstract input; skipping %s", title)
         return None
@@ -2751,8 +2754,22 @@ def prompt_manual_abstract_entry(
         logger.warning("Manual abstract input interrupted; skipping %s", title)
         return None
 
-    if choice not in {"m", "manual", "y", "yes"}:
+    choice = raw_choice.lower()
+    if not raw_choice or choice in {"n", "no", "cancel"}:
+        logger.info("Manual abstract input cancelled for %s", title)
         return None
+    if choice not in {"m", "manual", "y", "yes"}:
+        abstract = clean_text(raw_choice)
+        if not abstract or choice == "eof":
+            logger.info("Manual abstract input cancelled for %s", title)
+            return None
+        logger.info("Using directly pasted manual abstract for %s", title)
+        return {
+            "abstract": abstract,
+            "abstract_source": "Manual Input",
+            "abstract_status": "success",
+            "abstract_signature": compute_abstract_signature(paper),
+        }
 
     print("Paste the abstract below. Finish with a single line containing EOF.")
     print("If you want to cancel, just type EOF on an empty abstract.")
