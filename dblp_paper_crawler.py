@@ -127,6 +127,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--manual-abstract-first",
+        action="store_true",
+        help=(
+            "Prompt for manual abstract entry before trying automatic abstract fetching. "
+            "If manual input is skipped, automatic fetching will continue."
+        ),
+    )
+    parser.add_argument(
         "--randomize-ua",
         "--randomize-user-agent",
         action="store_true",
@@ -2804,6 +2812,31 @@ def prompt_manual_abstract_entry(
     }
 
 
+def obtain_abstract_info(
+    paper: Dict[str, Any],
+    session: requests.Session,
+    request_cfg: Dict[str, Any],
+    logger: logging.Logger,
+    manual_after_failure_enabled: bool = False,
+    manual_first_enabled: bool = False,
+) -> Dict[str, str]:
+    if manual_first_enabled:
+        manual_abstract_info = prompt_manual_abstract_entry(paper, logger)
+        if manual_abstract_info:
+            return manual_abstract_info
+
+    abstract_info = fetch_abstract(paper, session, request_cfg, logger)
+    if (
+        manual_after_failure_enabled
+        and clean_text(abstract_info.get("abstract_status")).lower() != "success"
+    ):
+        manual_abstract_info = prompt_manual_abstract_entry(paper, logger)
+        if manual_abstract_info:
+            return manual_abstract_info
+
+    return abstract_info
+
+
 def align_affiliations_by_order(
     authors: List[str],
     entries: List[Dict[str, Any]],
@@ -3876,12 +3909,14 @@ def main() -> int:
     publ_query_max_refetch_rounds = int(config["cache"]["publ_query_max_refetch_rounds"])
     client = None if args.no_llm else build_openai_client(config)
     manual_abstract_input_enabled = bool(args.manual_abstract_input)
+    manual_abstract_first_enabled = bool(args.manual_abstract_first)
 
-    if manual_abstract_input_enabled and not sys.stdin.isatty():
+    if (manual_abstract_input_enabled or manual_abstract_first_enabled) and not sys.stdin.isatty():
         logger.warning(
-            "--manual-abstract-input requested, but stdin is not interactive; manual abstract entry is disabled."
+            "Manual abstract entry was requested, but stdin is not interactive; manual abstract entry is disabled."
         )
         manual_abstract_input_enabled = False
+        manual_abstract_first_enabled = False
 
     if not args.no_llm and client is None:
         logger.warning(
@@ -3908,7 +3943,7 @@ def main() -> int:
         )
 
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s manual_abstract_first=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
@@ -3917,6 +3952,7 @@ def main() -> int:
         args.restart_from or NA,
         args.limit,
         manual_abstract_input_enabled,
+        manual_abstract_first_enabled,
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
@@ -4056,14 +4092,14 @@ def main() -> int:
             continue
 
         if should_refresh_abstract(record, config["cache"]):
-            abstract_info = fetch_abstract(record, session, config["request"], logger)
-            if (
-                manual_abstract_input_enabled
-                and clean_text(abstract_info.get("abstract_status")).lower() != "success"
-            ):
-                manual_abstract_info = prompt_manual_abstract_entry(record, logger)
-                if manual_abstract_info:
-                    abstract_info = manual_abstract_info
+            abstract_info = obtain_abstract_info(
+                record,
+                session,
+                config["request"],
+                logger,
+                manual_after_failure_enabled=manual_abstract_input_enabled,
+                manual_first_enabled=manual_abstract_first_enabled,
+            )
             record = merge_record(abstract_info, record)
             update_stage_checked_at(record, "abstract")
             append_cache_record(

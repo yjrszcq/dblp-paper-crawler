@@ -199,6 +199,12 @@ python3 dblp_paper_crawler.py --no-llm --limit 20
 python3 dblp_paper_crawler.py --manual-abstract-input
 ```
 
+如果你想在摘要阶段先走人工输入，而不是先尝试自动抓取，可以开启“手动优先”模式。此时程序会先提示你手动输入；如果你取消，再继续自动抓取：
+
+```bash
+python3 dblp_paper_crawler.py --manual-abstract-first
+```
+
 如果你想把当前配置范围内的摘要阶段重新跑一遍，并在失败时手动补录：
 
 ```bash
@@ -364,6 +370,7 @@ AND
 - 如果配置了 `cache.not_found_ttl_hours > 0`，则旧的 `not_found` 结果在过期后也会自动重新探测。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
 - `--manual-abstract-input` 开启后，程序在摘要自动获取失败时，会在终端里询问你是否手动输入当前论文摘要；手动录入成功后会按 `abstract_source=Manual Input`、`abstract_status=success` 写入缓存。
+- `--manual-abstract-first` 开启后，程序会在摘要阶段先提示你手动输入；如果你取消，才会继续自动抓取摘要。
 - `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后立即退出。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
