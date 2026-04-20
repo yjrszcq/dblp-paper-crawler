@@ -136,6 +136,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--skip-affiliations",
+        action="store_true",
+        help="Skip the affiliation enrichment stage and do not request affiliation data from external sources.",
+    )
+    parser.add_argument(
         "--randomize-ua",
         "--randomize-user-agent",
         action="store_true",
@@ -3157,6 +3162,18 @@ def fetch_affiliations(
         }
 
 
+def build_skipped_affiliation_result(paper: Dict[str, Any]) -> Dict[str, Any]:
+    authors = paper.get("authors") or []
+    return {
+        "authors": authors,
+        "affiliations": [NA],
+        "affiliation_source": NA,
+        "affiliation_mode": NA,
+        "affiliation_status": "skipped",
+        "affiliation_signature": compute_affiliation_signature(paper),
+    }
+
+
 def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
@@ -3964,7 +3981,7 @@ def main() -> int:
         )
 
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s manual_abstract_only=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s manual_abstract_only=%s skip_affiliations=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
@@ -3974,6 +3991,7 @@ def main() -> int:
         args.limit,
         manual_abstract_input_enabled,
         manual_abstract_only_enabled,
+        args.skip_affiliations,
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
@@ -4138,7 +4156,11 @@ def main() -> int:
         )
 
         if should_refresh_affiliations(record, config["cache"]):
-            affiliation_info = fetch_affiliations(record, session, config["request"], logger)
+            if args.skip_affiliations:
+                affiliation_info = build_skipped_affiliation_result(record)
+                logger.info("Skipping affiliation enrichment by flag for title=%s", current_title)
+            else:
+                affiliation_info = fetch_affiliations(record, session, config["request"], logger)
             record = merge_record(affiliation_info, record)
             update_stage_checked_at(record, "affiliation")
             append_cache_record(

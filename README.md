@@ -211,6 +211,18 @@ python3 dblp_paper_crawler.py --manual-abstract-only
 python3 dblp_paper_crawler.py --restart-from abstract --manual-abstract-input
 ```
 
+如果你想彻底跳过作者单位补全阶段，不请求 Crossref / OpenAlex / Semantic Scholar 这些作者单位数据源：
+
+```bash
+python3 dblp_paper_crawler.py --skip-affiliations
+```
+
+如果你想配合纯手动摘要输入一起用，避免后续作者单位阶段继续访问外部来源：
+
+```bash
+python3 dblp_paper_crawler.py --manual-abstract-only --skip-affiliations
+```
+
 如果你想把配置文件里的 `request.user_agent` 随机换成一个按浏览器平台、版本号和设备信息拼装出来的浏览器风格 UA，并在改写配置后立即退出：
 
 - 如果当前 `request.user_agent` 能识别出平台家族，随机时会尽量保持在同一类设备内，例如 Windows 不会跳成 macOS Safari，iPhone 不会跳成 Android Chrome。
@@ -371,6 +383,7 @@ AND
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
 - `--manual-abstract-input` 开启后，程序在摘要自动获取失败时，会在终端里询问你是否手动输入当前论文摘要；手动录入成功后会按 `abstract_source=Manual Input`、`abstract_status=success` 写入缓存。
 - `--manual-abstract-only` 开启后，程序会在摘要阶段只接受手动输入；如果你取消，则当前论文摘要记为跳过，不会再尝试自动抓取。
+- `--skip-affiliations` 开启后，程序会直接跳过作者单位补全阶段，不再请求外部作者单位数据源；如果当前论文单位信息还未完成，则会写成跳过状态，后续不带此参数时仍可继续补。
 - `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后立即退出。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
