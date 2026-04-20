@@ -119,6 +119,14 @@ def parse_args() -> argparse.Namespace:
         help="Only process the first N matched papers.",
     )
     parser.add_argument(
+        "--manual-abstract-input",
+        action="store_true",
+        help=(
+            "When abstract fetching does not succeed, allow manual abstract entry "
+            "for the current paper in the terminal."
+        ),
+    )
+    parser.add_argument(
         "--randomize-ua",
         "--randomize-user-agent",
         action="store_true",
@@ -2710,6 +2718,75 @@ def fetch_abstract(
         }
 
 
+def prompt_manual_abstract_entry(
+    paper: Dict[str, Any],
+    logger: logging.Logger,
+) -> Optional[Dict[str, str]]:
+    title = clean_text(paper.get("title")) or NA
+    venue = clean_text(paper.get("venue")) or NA
+    year = clean_text(paper.get("year")) or NA
+    link = first_non_empty(
+        f"https://doi.org/{normalize_doi(paper.get('doi'))}" if normalize_doi(paper.get("doi")) else "",
+        paper.get("paper_url"),
+        paper.get("dblp_url"),
+    )
+    link = link or NA
+
+    print("")
+    print("[Manual Abstract Input]")
+    print(f"Title: {title}")
+    print(f"Venue: {venue}")
+    print(f"Year: {year}")
+    print(f"Link: {link}")
+    print("Auto abstract fetch did not succeed.")
+    print("Type 'm' to paste the abstract manually, or press Enter to keep the current result.")
+
+    try:
+        choice = input("> ").strip().lower()
+    except EOFError:
+        logger.warning("EOF while waiting for manual abstract input; skipping %s", title)
+        return None
+    except KeyboardInterrupt:
+        print("")
+        logger.warning("Manual abstract input interrupted; skipping %s", title)
+        return None
+
+    if choice not in {"m", "manual", "y", "yes"}:
+        return None
+
+    print("Paste the abstract below. Finish with a single line containing EOF.")
+    print("If you want to cancel, just type EOF on an empty abstract.")
+
+    lines: List[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            logger.warning("EOF while reading manual abstract body; using the content entered so far for %s", title)
+            break
+        except KeyboardInterrupt:
+            print("")
+            logger.warning("Manual abstract body input interrupted; discarding manual input for %s", title)
+            return None
+
+        if line.strip() == "EOF":
+            break
+        lines.append(line)
+
+    abstract = clean_text("\n".join(lines))
+    if not abstract:
+        logger.info("Manual abstract input cancelled for %s", title)
+        return None
+
+    logger.info("Using manually entered abstract for %s", title)
+    return {
+        "abstract": abstract,
+        "abstract_source": "Manual Input",
+        "abstract_status": "success",
+        "abstract_signature": compute_abstract_signature(paper),
+    }
+
+
 def align_affiliations_by_order(
     authors: List[str],
     entries: List[Dict[str, Any]],
@@ -3781,6 +3858,13 @@ def main() -> int:
     )
     publ_query_max_refetch_rounds = int(config["cache"]["publ_query_max_refetch_rounds"])
     client = None if args.no_llm else build_openai_client(config)
+    manual_abstract_input_enabled = bool(args.manual_abstract_input)
+
+    if manual_abstract_input_enabled and not sys.stdin.isatty():
+        logger.warning(
+            "--manual-abstract-input requested, but stdin is not interactive; manual abstract entry is disabled."
+        )
+        manual_abstract_input_enabled = False
 
     if not args.no_llm and client is None:
         logger.warning(
@@ -3807,7 +3891,7 @@ def main() -> int:
         )
 
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
@@ -3815,6 +3899,7 @@ def main() -> int:
         args.no_llm,
         args.restart_from or NA,
         args.limit,
+        manual_abstract_input_enabled,
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
@@ -3955,6 +4040,13 @@ def main() -> int:
 
         if should_refresh_abstract(record, config["cache"]):
             abstract_info = fetch_abstract(record, session, config["request"], logger)
+            if (
+                manual_abstract_input_enabled
+                and clean_text(abstract_info.get("abstract_status")).lower() != "success"
+            ):
+                manual_abstract_info = prompt_manual_abstract_entry(record, logger)
+                if manual_abstract_info:
+                    abstract_info = manual_abstract_info
             record = merge_record(abstract_info, record)
             update_stage_checked_at(record, "abstract")
             append_cache_record(

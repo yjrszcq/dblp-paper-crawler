@@ -193,6 +193,18 @@ python3 dblp_paper_crawler.py --limit 20
 python3 dblp_paper_crawler.py --no-llm --limit 20
 ```
 
+如果你想在“摘要获取”阶段保留人工补录入口，可以开启手动摘要输入模式。程序会先自动抓取；只有当前论文摘要仍未成功获取时，才会在终端里提示你是否手动粘贴摘要：
+
+```bash
+python3 dblp_paper_crawler.py --manual-abstract-input
+```
+
+如果你想把当前配置范围内的摘要阶段重新跑一遍，并在失败时手动补录：
+
+```bash
+python3 dblp_paper_crawler.py --restart-from abstract --manual-abstract-input
+```
+
 如果你想把配置文件里的 `request.user_agent` 随机换成一个按浏览器平台、版本号和设备信息拼装出来的浏览器风格 UA，并在改写配置后立即退出：
 
 - 如果当前 `request.user_agent` 能识别出平台家族，随机时会尽量保持在同一类设备内，例如 Windows 不会跳成 macOS Safari，iPhone 不会跳成 Android Chrome。
@@ -351,6 +363,7 @@ AND
 - `not_found` 只表示在本轮所有候选数据源都正常返回、但仍未找到目标字段；像代理失败、429、503、解析失败这类情况会保留为失败状态，后续运行还会继续补。
 - 如果配置了 `cache.not_found_ttl_hours > 0`，则旧的 `not_found` 结果在过期后也会自动重新探测。
 - 每处理完一个阶段，都会把中间结果追加写入缓存，所以程序中断后再次运行时会自动续跑。
+- `--manual-abstract-input` 开启后，程序在摘要自动获取失败时，会在终端里询问你是否手动输入当前论文摘要；手动录入成功后会按 `abstract_source=Manual Input`、`abstract_status=success` 写入缓存。
 - `--randomize-ua` 会直接修改配置文件中的 `request.user_agent`，并按浏览器平台、版本号和设备信息随机生成新的 UA 后立即退出。
 - 可以使用 `--restart-from <stage>` 强制从某个阶段重新开始，并重写当前配置范围内该阶段及其之后的缓存。
 - 支持的阶段有：`fetch`、`match`、`detail`、`abstract`、`affiliation`、`llm`。其中 `crawl` 是 `fetch` 的别名。
