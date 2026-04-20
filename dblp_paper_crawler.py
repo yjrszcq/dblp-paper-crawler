@@ -127,11 +127,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--manual-abstract-only",
         "--manual-abstract-first",
         action="store_true",
         help=(
-            "Prompt for manual abstract entry before trying automatic abstract fetching. "
-            "If manual input is skipped, automatic fetching will continue."
+            "Use manual abstract entry only for the abstract stage. "
+            "If manual input is skipped, the paper's abstract stage is skipped without automatic fetching."
         ),
     )
     parser.add_argument(
@@ -2729,6 +2730,7 @@ def fetch_abstract(
 def prompt_manual_abstract_entry(
     paper: Dict[str, Any],
     logger: logging.Logger,
+    fetch_attempted: bool = True,
 ) -> Optional[Dict[str, str]]:
     title = clean_text(paper.get("title")) or NA
     venue = clean_text(paper.get("venue")) or NA
@@ -2746,7 +2748,10 @@ def prompt_manual_abstract_entry(
     print(f"Venue: {venue}")
     print(f"Year: {year}")
     print(f"Link: {link}")
-    print("Auto abstract fetch did not succeed.")
+    if fetch_attempted:
+        print("Auto abstract fetch did not succeed.")
+    else:
+        print("Manual abstract mode is enabled for this paper.")
     print(
         "Type 'm' to enter multi-line manual input, paste a single-line abstract directly here, "
         "or press Enter / type 'n' to keep the current result."
@@ -2818,19 +2823,32 @@ def obtain_abstract_info(
     request_cfg: Dict[str, Any],
     logger: logging.Logger,
     manual_after_failure_enabled: bool = False,
-    manual_first_enabled: bool = False,
+    manual_only_enabled: bool = False,
 ) -> Dict[str, str]:
-    if manual_first_enabled:
-        manual_abstract_info = prompt_manual_abstract_entry(paper, logger)
+    if manual_only_enabled:
+        if not sys.stdin.isatty():
+            return {
+                "abstract": NA,
+                "abstract_source": NA,
+                "abstract_status": "manual_skipped",
+                "abstract_signature": compute_abstract_signature(paper),
+            }
+        manual_abstract_info = prompt_manual_abstract_entry(paper, logger, fetch_attempted=False)
         if manual_abstract_info:
             return manual_abstract_info
+        return {
+            "abstract": NA,
+            "abstract_source": NA,
+            "abstract_status": "manual_skipped",
+            "abstract_signature": compute_abstract_signature(paper),
+        }
 
     abstract_info = fetch_abstract(paper, session, request_cfg, logger)
     if (
         manual_after_failure_enabled
         and clean_text(abstract_info.get("abstract_status")).lower() != "success"
     ):
-        manual_abstract_info = prompt_manual_abstract_entry(paper, logger)
+        manual_abstract_info = prompt_manual_abstract_entry(paper, logger, fetch_attempted=True)
         if manual_abstract_info:
             return manual_abstract_info
 
@@ -3909,14 +3927,17 @@ def main() -> int:
     publ_query_max_refetch_rounds = int(config["cache"]["publ_query_max_refetch_rounds"])
     client = None if args.no_llm else build_openai_client(config)
     manual_abstract_input_enabled = bool(args.manual_abstract_input)
-    manual_abstract_first_enabled = bool(args.manual_abstract_first)
+    manual_abstract_only_enabled = bool(args.manual_abstract_only)
 
-    if (manual_abstract_input_enabled or manual_abstract_first_enabled) and not sys.stdin.isatty():
+    if manual_abstract_input_enabled and not sys.stdin.isatty():
         logger.warning(
-            "Manual abstract entry was requested, but stdin is not interactive; manual abstract entry is disabled."
+            "--manual-abstract-input requested, but stdin is not interactive; fallback manual abstract entry is disabled."
         )
         manual_abstract_input_enabled = False
-        manual_abstract_first_enabled = False
+    if manual_abstract_only_enabled and not sys.stdin.isatty():
+        logger.warning(
+            "--manual-abstract-only requested, but stdin is not interactive; abstracts will be marked as skipped without automatic fetching."
+        )
 
     if not args.no_llm and client is None:
         logger.warning(
@@ -3943,7 +3964,7 @@ def main() -> int:
         )
 
     logger.info(
-        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s manual_abstract_first=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
+        "Starting crawl for dblp_base_url=%s venues=%s years=%s-%s no_llm=%s restart_from=%s limit=%s manual_abstract_input=%s manual_abstract_only=%s cache_enabled=%s publ_query_cache_enabled=%s publ_query_max_refetch_rounds=%s not_found_ttl_hours=%s trust_env=%s user_agent=%s sleep_seconds=%s sleep_jitter_range=%s..%s",
         config["dblp"]["base_url"],
         config["dblp"]["venues"],
         config["dblp"]["year_start"],
@@ -3952,7 +3973,7 @@ def main() -> int:
         args.restart_from or NA,
         args.limit,
         manual_abstract_input_enabled,
-        manual_abstract_first_enabled,
+        manual_abstract_only_enabled,
         cache_enabled,
         publ_query_cache_enabled,
         publ_query_max_refetch_rounds,
@@ -4098,7 +4119,7 @@ def main() -> int:
                 config["request"],
                 logger,
                 manual_after_failure_enabled=manual_abstract_input_enabled,
-                manual_first_enabled=manual_abstract_first_enabled,
+                manual_only_enabled=manual_abstract_only_enabled,
             )
             record = merge_record(abstract_info, record)
             update_stage_checked_at(record, "abstract")
