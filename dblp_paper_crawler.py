@@ -128,7 +128,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--manual-abstract-only",
-        "--manual-abstract-first",
         action="store_true",
         help=(
             "Use manual abstract entry only for the abstract stage. "
